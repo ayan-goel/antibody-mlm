@@ -1,0 +1,9 @@
+task: binding
+checkpoint: models/checkpoints/uniform_medium/final
+mode: probe
+learning_rate: 1.0e-3
+epochs: 50
+batch_size: 32
+early_stopping_patience: 10
+num_seeds: 3
+output_dir: downstream_outputs

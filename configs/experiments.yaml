@@ -1,0 +1,16 @@
+# Experiment registry: maps experiment names to training configs and checkpoints.
+# Used by scripts/run_all_evaluations.py and scripts/generate_report.py.
+
+experiments:
+  uniform_medium:
+    config: configs/medium.yaml
+    checkpoint: models/checkpoints/uniform_medium/final
+  cdr_medium:
+    config: configs/cdr_medium.yaml
+    checkpoint: models/checkpoints/cdr_medium/final
+
+# Downstream task configs applied to every experiment checkpoint.
+downstream_tasks:
+  - configs/downstream/paratope_probe.yaml
+  - configs/downstream/binding_probe.yaml
+  - configs/downstream/developability_probe.yaml
