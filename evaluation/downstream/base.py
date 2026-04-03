@@ -91,9 +91,6 @@ class BaseDownstreamTask(ABC):
             len(train_data), len(val_data), len(test_data),
         )
 
-        encoder = EncoderWrapper.from_checkpoint(
-            self.config.checkpoint, device=self.config.device,
-        )
         tokenizer = load_tokenizer(self.config.model_name)
         trainer = DownstreamTrainer(self.config)
 
@@ -110,22 +107,36 @@ class BaseDownstreamTask(ABC):
             val_cache = cache_dir / "val.pt"
             test_cache = cache_dir / "test.pt"
 
-            if not train_cache.exists():
-                logger.info("Caching train embeddings...")
-                extract_and_cache(encoder, train_data, tokenizer, train_cache,
-                                  batch_size=self.config.batch_size, device=self.config.device)
-            if not val_cache.exists():
-                logger.info("Caching val embeddings...")
-                extract_and_cache(encoder, val_data, tokenizer, val_cache,
-                                  batch_size=self.config.batch_size, device=self.config.device)
-            if not test_cache.exists():
-                logger.info("Caching test embeddings...")
-                extract_and_cache(encoder, test_data, tokenizer, test_cache,
-                                  batch_size=self.config.batch_size, device=self.config.device)
+            needs_caching = not (train_cache.exists() and val_cache.exists() and test_cache.exists())
+            if needs_caching:
+                encoder = EncoderWrapper.from_checkpoint(
+                    self.config.checkpoint, device=self.config.device,
+                )
+                if not train_cache.exists():
+                    logger.info("Caching train embeddings...")
+                    extract_and_cache(encoder, train_data, tokenizer, train_cache,
+                                      batch_size=self.config.batch_size, device=self.config.device)
+                if not val_cache.exists():
+                    logger.info("Caching val embeddings...")
+                    extract_and_cache(encoder, val_data, tokenizer, val_cache,
+                                      batch_size=self.config.batch_size, device=self.config.device)
+                if not test_cache.exists():
+                    logger.info("Caching test embeddings...")
+                    extract_and_cache(encoder, test_data, tokenizer, test_cache,
+                                      batch_size=self.config.batch_size, device=self.config.device)
+                del encoder
+                torch.cuda.empty_cache()
+                logger.info("Encoder freed after caching embeddings")
 
             cached_train = CachedEmbeddingDataset(train_cache, train_labels)
             cached_val = CachedEmbeddingDataset(val_cache, val_labels)
             cached_test = CachedEmbeddingDataset(test_cache, test_labels)
+            hidden_size = cached_train.hidden_states.size(-1)
+        else:
+            encoder = EncoderWrapper.from_checkpoint(
+                self.config.checkpoint, device=self.config.device,
+            )
+            hidden_size = encoder.hidden_size
 
         all_seed_metrics: list[dict[str, float]] = []
 
@@ -134,7 +145,7 @@ class BaseDownstreamTask(ABC):
             set_seed(seed)
             logger.info("--- Seed %d/%d (seed=%d) ---", seed_idx + 1, self.config.num_seeds, seed)
 
-            head = self.build_head(encoder.hidden_size)
+            head = self.build_head(hidden_size)
 
             if self.config.mode == "probe":
                 train_result = trainer.train_probe(

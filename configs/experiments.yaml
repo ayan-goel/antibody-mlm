@@ -8,6 +8,12 @@ experiments:
   cdr_medium:
     config: configs/cdr_medium.yaml
     checkpoint: models/checkpoints/cdr_medium/final
+  span_medium:
+    config: configs/span_medium.yaml
+    checkpoint: models/checkpoints/span_medium/final
+  structure_medium:
+    config: configs/structure_medium.yaml
+    checkpoint: models/checkpoints/structure_medium/final
 
 # Downstream task configs applied to every experiment checkpoint.
 downstream_tasks:

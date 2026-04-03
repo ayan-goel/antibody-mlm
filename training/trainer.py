@@ -65,6 +65,7 @@ def train(config: ExperimentConfig) -> Path:
         data_path=config.data.processed_path,
         tokenizer=tokenizer,
         max_length=config.data.max_length,
+        coords_path=config.data.coords_path or None,
     )
 
     train_size = int(len(full_dataset) * config.data.train_split)

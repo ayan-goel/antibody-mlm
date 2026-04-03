@@ -16,6 +16,12 @@ from transformers import PreTrainedTokenizerBase
 from masking.base import BaseMaskingStrategy
 
 
+def _to_tensor(value: Any) -> torch.Tensor:
+    """Convert a value to a tensor, preserving float dtype where appropriate."""
+    t = torch.as_tensor(value)
+    return t.float() if t.is_floating_point() else t.long()
+
+
 @dataclass
 class MLMDataCollator:
     """Collator for masked language modeling with pluggable masking strategy.
@@ -38,7 +44,7 @@ class MLMDataCollator:
 
         extra_keys = {k for ex in examples for k in ex if k not in self._CORE_KEYS}
         extra_lists: dict[str, list[torch.Tensor]] = {
-            k: [torch.tensor(ex[k], dtype=torch.long) for ex in examples if k in ex]
+            k: [_to_tensor(ex[k]) for ex in examples if k in ex]
             for k in extra_keys
         }
 
@@ -69,7 +75,8 @@ class MLMDataCollator:
                     if i < len(tensors):
                         t = tensors[i]
                         if pad_len > 0 and t.dim() >= 1:
-                            t = torch.cat([t, torch.zeros(pad_len, dtype=t.dtype)])
+                            pad_shape = (pad_len,) + t.shape[1:]
+                            t = torch.cat([t, torch.zeros(pad_shape, dtype=t.dtype)])
                         metadata[k] = t
                         batch_metadata[k].append(t)
 

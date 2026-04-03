@@ -70,6 +70,8 @@ class DownstreamTrainer:
             Dict with best_val_metrics, best_epoch, and training_history.
         """
         head.to(self.device)
+        if isinstance(loss_fn, nn.Module):
+            loss_fn = loss_fn.to(self.device)
         train_loader = DataLoader(
             train_data, batch_size=self.config.batch_size, shuffle=True,
             num_workers=0,

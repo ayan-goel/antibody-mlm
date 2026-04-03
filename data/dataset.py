@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
@@ -50,10 +53,14 @@ class AntibodyDataset(Dataset):
         data_path: str,
         tokenizer: PreTrainedTokenizer,
         max_length: int = 160,
+        coords_path: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.records = load_jsonl(data_path)
+        self.coords: list | None = None
+        if coords_path and Path(coords_path).exists():
+            self.coords = torch.load(coords_path, weights_only=False)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -86,5 +93,13 @@ class AntibodyDataset(Dataset):
                 if token_pos < num_tokens - 1:  # don't overwrite [SEP]
                     token_labels[token_pos] = label
             result["cdr_mask"] = token_labels
+
+        if self.coords is not None and idx < len(self.coords) and self.coords[idx] is not None:
+            aa_coords = self.coords[idx]["coords_ca"]
+            num_tokens = len(encoding["input_ids"])
+            token_coords = torch.zeros(num_tokens, 3)
+            n_aa = min(len(aa_coords), num_tokens - 2)
+            token_coords[1 : 1 + n_aa] = aa_coords[:n_aa].float()
+            result["coords_ca"] = token_coords.tolist()
 
         return result

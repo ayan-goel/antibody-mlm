@@ -367,6 +367,17 @@ def run_experiment(
     output_dir = Path(args.output_dir) / name
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / "all_metrics.json"
+
+    if out_path.exists():
+        with out_path.open() as f:
+            existing = json.load(f)
+        for key, value in all_metrics.items():
+            if key in ("experiment", "config", "checkpoint", "num_eval_samples"):
+                existing[key] = value
+            elif value not in (None, {"error": "section failed, see logs"}):
+                existing[key] = value
+        all_metrics = existing
+
     with out_path.open("w") as f:
         json.dump(all_metrics, f, indent=2, default=str)
     logger.info("All metrics saved to %s", out_path)
