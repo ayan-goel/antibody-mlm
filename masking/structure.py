@@ -18,12 +18,15 @@ structural context saturates around 32-48 nearest Calpha neighbors.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
 from transformers import PreTrainedTokenizerBase
 
 from masking.base import BaseMaskingStrategy, register_strategy
+
+logger = logging.getLogger(__name__)
 
 
 @register_strategy("structure")
@@ -52,12 +55,20 @@ class StructureMasking(BaseMaskingStrategy):
             **kwargs,
         )
         self.k_neighbors = k_neighbors
+        self._fallback_count = 0
+        self._total_count = 0
 
     def _uniform_fallback(
         self,
         input_ids: torch.Tensor,
         special_tokens_mask: torch.Tensor,
     ) -> torch.Tensor:
+        self._fallback_count += 1
+        if self._fallback_count <= 10 or self._fallback_count % 1000 == 0:
+            logger.warning(
+                "Structure masking fallback to uniform (%d/%d sequences so far)",
+                self._fallback_count, self._total_count,
+            )
         probability_matrix = torch.full(input_ids.shape, self.mask_prob)
         probability_matrix[special_tokens_mask.bool()] = 0.0
         return torch.bernoulli(probability_matrix).bool()
@@ -68,6 +79,8 @@ class StructureMasking(BaseMaskingStrategy):
         special_tokens_mask: torch.Tensor,
         metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        self._total_count += 1
+
         if metadata is None:
             return self._uniform_fallback(input_ids, special_tokens_mask)
 

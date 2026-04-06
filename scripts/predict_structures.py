@@ -50,9 +50,10 @@ def contacts_to_knn(contact_probs: torch.Tensor, k: int) -> torch.Tensor:
     contact_probs.fill_diagonal_(0.0)
     actual_k = min(k, seq_len - 1)
     _, indices = contact_probs.topk(actual_k, dim=1, largest=True)
+    indices = indices.to(torch.int16)
     # Pad if seq is shorter than k
     if actual_k < k:
-        pad = torch.zeros(seq_len, k - actual_k, dtype=torch.long)
+        pad = torch.zeros(seq_len, k - actual_k, dtype=torch.int16)
         indices = torch.cat([indices, pad], dim=1)
     return indices
 

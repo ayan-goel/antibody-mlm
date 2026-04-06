@@ -12,12 +12,15 @@ masked positions on paratope residues despite paratopes being only
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
 from transformers import PreTrainedTokenizerBase
 
 from masking.base import BaseMaskingStrategy, register_strategy
+
+logger = logging.getLogger(__name__)
 
 
 @register_strategy("interface")
@@ -49,6 +52,9 @@ class InterfaceMasking(BaseMaskingStrategy):
         )
         self.paratope_weight = paratope_weight
         self.non_paratope_weight = non_paratope_weight
+        self._total_calls = 0
+        self._fallback_calls = 0
+        self._log_interval = 1000
 
     def select_mask_positions(
         self,
@@ -57,11 +63,32 @@ class InterfaceMasking(BaseMaskingStrategy):
         metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         paratope_labels = metadata.get("paratope_labels") if metadata else None
+        self._total_calls += 1
 
         if paratope_labels is None:
+            self._fallback_calls += 1
+            if self._fallback_calls == 1:
+                logger.warning(
+                    "InterfaceMasking: falling back to uniform (no paratope_labels). "
+                    "Check that the paratope .pt sidecar file was generated and "
+                    "paratope_path is set in the config."
+                )
+            if self._total_calls % self._log_interval == 0:
+                pct = self._fallback_calls / self._total_calls * 100
+                logger.warning(
+                    "InterfaceMasking fallback rate: %d / %d (%.1f%%)",
+                    self._fallback_calls, self._total_calls, pct,
+                )
             probability_matrix = torch.full(input_ids.shape, self.mask_prob)
             probability_matrix[special_tokens_mask.bool()] = 0.0
             return torch.bernoulli(probability_matrix).bool()
+
+        if self._total_calls % self._log_interval == 0 and self._fallback_calls > 0:
+            pct = self._fallback_calls / self._total_calls * 100
+            logger.info(
+                "InterfaceMasking fallback rate: %d / %d (%.1f%%)",
+                self._fallback_calls, self._total_calls, pct,
+            )
 
         weights = self.non_paratope_weight + (
             self.paratope_weight - self.non_paratope_weight
