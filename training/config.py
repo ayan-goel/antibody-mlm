@@ -20,6 +20,7 @@ class DataConfig:
     valid_amino_acids: str = "ACDEFGHIKLMNPQRSTVWY"
     coords_path: str = ""
     paratope_path: str = ""
+    germline_path: str = ""
 
 
 @dataclass

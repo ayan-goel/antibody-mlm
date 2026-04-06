@@ -55,6 +55,7 @@ class AntibodyDataset(Dataset):
         max_length: int = 160,
         coords_path: str | None = None,
         paratope_path: str | None = None,
+        germline_path: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -65,6 +66,9 @@ class AntibodyDataset(Dataset):
         self.paratope_labels: list | None = None
         if paratope_path and Path(paratope_path).exists():
             self.paratope_labels = torch.load(paratope_path, weights_only=False)
+        self.germline_labels: list | None = None
+        if germline_path and Path(germline_path).exists():
+            self.germline_labels = torch.load(germline_path, weights_only=False)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -130,5 +134,16 @@ class AntibodyDataset(Dataset):
             n_aa = min(len(aa_labels), num_tokens - 2)
             token_labels[1:1 + n_aa] = aa_labels[:n_aa].float()
             result["paratope_labels"] = token_labels.tolist()
+
+        if (self.germline_labels is not None
+                and idx < len(self.germline_labels)
+                and self.germline_labels[idx] is not None):
+            entry = self.germline_labels[idx]
+            aa_labels = entry["germline_labels"]
+            num_tokens = len(encoding["input_ids"])
+            token_labels = torch.zeros(num_tokens, dtype=torch.float)
+            n_aa = min(len(aa_labels), num_tokens - 2)
+            token_labels[1:1 + n_aa] = aa_labels[:n_aa].float()
+            result["germline_labels"] = token_labels.tolist()
 
         return result

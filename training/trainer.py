@@ -67,6 +67,7 @@ def train(config: ExperimentConfig) -> Path:
         max_length=config.data.max_length,
         coords_path=config.data.coords_path or None,
         paratope_path=config.data.paratope_path or None,
+        germline_path=config.data.germline_path or None,
     )
 
     train_size = int(len(full_dataset) * config.data.train_split)
