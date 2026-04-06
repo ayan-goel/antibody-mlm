@@ -19,6 +19,7 @@ class DataConfig:
     train_split: float = 0.9
     valid_amino_acids: str = "ACDEFGHIKLMNPQRSTVWY"
     coords_path: str = ""
+    paratope_path: str = ""
 
 
 @dataclass

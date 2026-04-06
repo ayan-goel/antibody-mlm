@@ -1,22 +1,21 @@
-"""Predict antibody structures with IgFold and store Calpha coordinates.
+"""Predict spatial neighborhoods via ESM2 contact maps.
 
-Runs IgFold on each sequence in a processed JSONL, extracts Calpha
-backbone coordinates and pLDDT confidence scores, applies a quality
-filter (mean pLDDT >= threshold), and saves a sidecar .pt file aligned
-by index with the JSONL.
+Runs ESM2 on batches of sequences, extracts attention-based contact
+probability maps, converts them to kNN neighbor lists, and saves a
+sidecar .pt file aligned by index with the JSONL.
 
 Output .pt format:
     List[dict | None] of length N (same as JSONL record count).
-    Each entry is None (prediction failed or filtered) or:
-        {"coords_ca": FloatTensor(L, 3), "plddt": FloatTensor(L)}
+    Each entry is:
+        {"knn_indices": LongTensor(L, k)} — per-residue k nearest neighbors
 
 Usage:
     python scripts/predict_structures.py \
-        --input data/processed/oas_vh_tiny.jsonl \
-        --output data/structures/oas_vh_tiny_coords.pt \
-        --plddt_threshold 70
+        --input data/processed/oas_vh_500k.jsonl \
+        --output data/structures/oas_vh_500k_coords.pt \
+        --batch_size 64 --k_neighbors 32
 
-IgFold is only imported here — training code never depends on it.
+ESM2 is only imported here — training code never depends on it.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -36,39 +34,61 @@ from utils.io import load_jsonl
 logger = logging.getLogger(__name__)
 
 
-def predict_single(
-    sequence: str,
-    igfold_runner: object,
-    tmp_dir: Path,
-) -> dict[str, torch.Tensor] | None:
-    """Run IgFold on a single VH sequence and extract Calpha coords + pLDDT.
+def contacts_to_knn(contact_probs: torch.Tensor, k: int) -> torch.Tensor:
+    """Convert a contact probability matrix to kNN indices.
 
-    Returns None if prediction fails.
+    Args:
+        contact_probs: [L, L] contact probabilities (higher = closer).
+        k: number of neighbors per residue.
+
+    Returns:
+        [L, k] LongTensor of neighbor indices (excluding self).
     """
-    try:
-        pdb_path = tmp_dir / "pred.pdb"
-        output = igfold_runner.fold(
-            pdb_path,
-            sequences={"H": sequence},
-            do_refine=False,
-            do_renum=False,
-        )
+    seq_len = contact_probs.size(0)
+    # Zero out the diagonal so self is not a neighbor
+    contact_probs = contact_probs.clone()
+    contact_probs.fill_diagonal_(0.0)
+    actual_k = min(k, seq_len - 1)
+    _, indices = contact_probs.topk(actual_k, dim=1, largest=True)
+    # Pad if seq is shorter than k
+    if actual_k < k:
+        pad = torch.zeros(seq_len, k - actual_k, dtype=torch.long)
+        indices = torch.cat([indices, pad], dim=1)
+    return indices
 
-        coords_ca = output.coords[:, 1, :]  # Calpha is atom index 1 in IgFold
-        plddt = output.plddt[:, 1] if output.plddt.dim() == 2 else output.plddt
 
-        return {
-            "coords_ca": coords_ca.detach().cpu().float(),
-            "plddt": plddt.detach().cpu().float(),
-        }
-    except Exception as e:
-        logger.warning("Prediction failed for sequence (len=%d): %s", len(sequence), e)
-        return None
+def predict_batch(
+    sequences: list[str],
+    model: torch.nn.Module,
+    batch_converter: object,
+    k: int,
+    device: str,
+) -> list[dict[str, torch.Tensor] | None]:
+    """Run ESM2 contact prediction on a batch and return kNN lists."""
+    data = [(f"seq_{i}", seq) for i, seq in enumerate(sequences)]
+    _, _, tokens = batch_converter(data)
+    tokens = tokens.to(device)
+
+    with torch.no_grad():
+        out = model(tokens, repr_layers=[], return_contacts=True)
+    contacts = out["contacts"]  # [B, L, L] — already cropped to seq length
+
+    results = []
+    for i, seq in enumerate(sequences):
+        try:
+            seq_len = len(seq)
+            contact_map = contacts[i, :seq_len, :seq_len].cpu().float()
+            knn = contacts_to_knn(contact_map, k)
+            results.append({"knn_indices": knn})
+        except Exception as e:
+            logger.warning("Failed for seq %d (len=%d): %s", i, len(seq), e)
+            results.append(None)
+    return results
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Predict antibody structures and store Calpha coordinates"
+        description="Predict spatial neighborhoods via ESM2 contact maps"
     )
     parser.add_argument(
         "--input", type=str, required=True,
@@ -79,12 +99,16 @@ def main() -> None:
         help="Path to output .pt sidecar file",
     )
     parser.add_argument(
-        "--plddt_threshold", type=float, default=70.0,
-        help="Minimum mean pLDDT to keep a structure (default: 70)",
+        "--k_neighbors", type=int, default=32,
+        help="Number of nearest neighbors per residue (default: 32)",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=64,
+        help="Batch size for ESM2 inference (default: 64)",
     )
     parser.add_argument(
         "--max_sequences", type=int, default=0,
-        help="Max sequences to process (0 = all, useful for development)",
+        help="Max sequences to process (0 = all)",
     )
     parser.add_argument(
         "--resume", type=str, default="",
@@ -105,7 +129,6 @@ def main() -> None:
     logger.info("Will process %d / %d sequences", total, len(records))
 
     results: list[dict[str, torch.Tensor] | None] = [None] * len(records)
-    start_idx = 0
 
     if args.resume and Path(args.resume).exists():
         logger.info("Resuming from %s", args.resume)
@@ -113,69 +136,52 @@ def main() -> None:
         for i, entry in enumerate(existing):
             if i < len(results):
                 results[i] = entry
-        start_idx = sum(1 for e in existing if e is not None)
-        logger.info("Loaded %d existing predictions", start_idx)
+        done = sum(1 for e in existing[:total] if e is not None)
+        logger.info("Loaded %d existing predictions", done)
 
-    try:
-        from igfold import IgFoldRunner
-    except ImportError:
-        logger.error(
-            "IgFold is not installed. Install it with: pip install igfold\n"
-            "See https://github.com/Graylab/IgFold for details."
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    logger.info("Loading ESM2 model...")
+    import esm
+    model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+    batch_converter = alphabet.get_batch_converter()
+    model = model.eval().to(device).half()
+    logger.info("ESM2 loaded on %s", device)
+
+    todo_indices = [i for i in range(total) if results[i] is None]
+    logger.info("Sequences to predict: %d (skipping %d already done)",
+                len(todo_indices), total - len(todo_indices))
+
+    processed = 0
+    for batch_start in range(0, len(todo_indices), args.batch_size):
+        batch_indices = todo_indices[batch_start : batch_start + args.batch_size]
+        batch_sequences = [records[i]["sequence"] for i in batch_indices]
+
+        batch_results = predict_batch(
+            batch_sequences, model, batch_converter,
+            args.k_neighbors, device,
         )
-        sys.exit(1)
 
-    logger.info("Initializing IgFold model...")
-    igfold_runner = IgFoldRunner()
+        for j, idx in enumerate(batch_indices):
+            results[idx] = batch_results[j]
 
-    passed = 0
-    failed = 0
-    filtered = 0
+        processed += len(batch_indices)
+        if processed % (args.batch_size * 50) == 0 or processed >= len(todo_indices):
+            logger.info("Progress: %d/%d", processed, len(todo_indices))
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        for i in range(total):
-            if results[i] is not None:
-                passed += 1
-                continue
-
-            sequence = records[i]["sequence"]
-            result = predict_single(sequence, igfold_runner, tmp_path)
-
-            if result is None:
-                failed += 1
-                results[i] = None
-            elif result["plddt"].mean().item() < args.plddt_threshold:
-                filtered += 1
-                results[i] = None
-                logger.debug(
-                    "Filtered idx=%d: mean pLDDT=%.1f < %.1f",
-                    i, result["plddt"].mean().item(), args.plddt_threshold,
-                )
-            else:
-                passed += 1
-                results[i] = result
-
-            if (i + 1) % 100 == 0 or (i + 1) == total:
-                logger.info(
-                    "Progress: %d/%d (passed=%d, failed=%d, filtered=%d)",
-                    i + 1, total, passed, failed, filtered,
-                )
-
-            if (i + 1) % 1000 == 0:
-                output_path = Path(args.output)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                torch.save(results, str(output_path))
-                logger.info("Checkpoint saved to %s", output_path)
+        if processed % 10000 < args.batch_size:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(results, str(output_path))
+            logger.info("Checkpoint saved to %s", output_path)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(results, str(output_path))
 
+    succeeded = sum(1 for e in results[:total] if e is not None)
     logger.info("Done. Saved %d entries to %s", len(results), output_path)
-    logger.info("Statistics: passed=%d, failed=%d, filtered=%d", passed, failed, filtered)
-    coverage = passed / total * 100 if total > 0 else 0
-    logger.info("Coverage: %.1f%% of sequences have valid structures", coverage)
+    logger.info("Coverage: %d/%d (%.1f%%)", succeeded, total, succeeded / total * 100)
 
 
 if __name__ == "__main__":

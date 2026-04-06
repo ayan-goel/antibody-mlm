@@ -54,6 +54,7 @@ class AntibodyDataset(Dataset):
         tokenizer: PreTrainedTokenizer,
         max_length: int = 160,
         coords_path: str | None = None,
+        paratope_path: str | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -61,6 +62,9 @@ class AntibodyDataset(Dataset):
         self.coords: list | None = None
         if coords_path and Path(coords_path).exists():
             self.coords = torch.load(coords_path, weights_only=False)
+        self.paratope_labels: list | None = None
+        if paratope_path and Path(paratope_path).exists():
+            self.paratope_labels = torch.load(paratope_path, weights_only=False)
 
     def __len__(self) -> int:
         return len(self.records)
@@ -95,11 +99,36 @@ class AntibodyDataset(Dataset):
             result["cdr_mask"] = token_labels
 
         if self.coords is not None and idx < len(self.coords) and self.coords[idx] is not None:
-            aa_coords = self.coords[idx]["coords_ca"]
+            entry = self.coords[idx]
             num_tokens = len(encoding["input_ids"])
-            token_coords = torch.zeros(num_tokens, 3)
-            n_aa = min(len(aa_coords), num_tokens - 2)
-            token_coords[1 : 1 + n_aa] = aa_coords[:n_aa].float()
-            result["coords_ca"] = token_coords.tolist()
+
+            if "knn_indices" in entry:
+                # ESM2 contact-map based kNN neighbors (per amino acid)
+                aa_knn = entry["knn_indices"]  # [L_aa, k]
+                k = aa_knn.size(1)
+                # Build token-level kNN: offset by 1 for [CLS], pad specials to 0
+                token_knn = torch.zeros(num_tokens, k, dtype=torch.long)
+                n_aa = min(len(aa_knn), num_tokens - 2)
+                # Offset neighbor indices by 1 to account for [CLS] token
+                token_knn[1 : 1 + n_aa] = aa_knn[:n_aa] + 1
+                result["knn_indices"] = token_knn.tolist()
+            elif "coords_ca" in entry:
+                # Legacy: IgFold Calpha coordinates
+                aa_coords = entry["coords_ca"]
+                token_coords = torch.zeros(num_tokens, 3)
+                n_aa = min(len(aa_coords), num_tokens - 2)
+                token_coords[1 : 1 + n_aa] = aa_coords[:n_aa].float()
+                result["coords_ca"] = token_coords.tolist()
+
+        if (self.paratope_labels is not None
+                and idx < len(self.paratope_labels)
+                and self.paratope_labels[idx] is not None):
+            entry = self.paratope_labels[idx]
+            aa_labels = entry["paratope_labels"]
+            num_tokens = len(encoding["input_ids"])
+            token_labels = torch.zeros(num_tokens, dtype=torch.float)
+            n_aa = min(len(aa_labels), num_tokens - 2)
+            token_labels[1:1 + n_aa] = aa_labels[:n_aa].float()
+            result["paratope_labels"] = token_labels.tolist()
 
         return result

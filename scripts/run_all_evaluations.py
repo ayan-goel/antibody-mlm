@@ -274,6 +274,7 @@ def _run_downstream(
             results[config.task] = task_results
         except Exception:
             logger.exception("  Failed to run downstream task %s", config.task)
+            results[config.task] = {"error": True, "task": config.task, "mode": config.mode}
     return results
 
 
