@@ -27,6 +27,7 @@ import yaml
 from transformers import RoFormerForMaskedLM
 
 from data.dataset import AntibodyDataset
+from data.dataset_paired import PairedAntibodyDataset
 from evaluation.downstream import DownstreamConfig, get_task, load_downstream_config
 from evaluation.infilling import InfillingEvaluator
 from evaluation.infilling_quality import InfillingQualityAnalyzer
@@ -35,7 +36,7 @@ from evaluation.pseudo_loglikelihood import compute_pll, compute_pll_batch
 from masking import get_strategy
 from training.config import load_config
 from utils.seed import set_seed
-from utils.tokenizer import load_tokenizer
+from utils.tokenizer import load_tokenizer, load_tokenizer_multispecific
 
 logging.basicConfig(
     level=logging.INFO,
@@ -294,16 +295,34 @@ def run_experiment(
     config = load_config(config_path)
     set_seed(config.seed)
 
-    tokenizer = load_tokenizer(config.model.model_name)
+    if config.data.paired:
+        tokenizer = load_tokenizer_multispecific(config.model.model_name)
+    else:
+        tokenizer = load_tokenizer(config.model.model_name)
+
     model = RoFormerForMaskedLM.from_pretrained(checkpoint_path)
     model.to(args.device)
     model.eval()
 
-    full_dataset = AntibodyDataset(
-        data_path=config.data.processed_path,
-        tokenizer=tokenizer,
-        max_length=config.data.max_length,
-    )
+    if config.data.paired:
+        full_dataset = PairedAntibodyDataset(
+            data_path=config.data.processed_path,
+            tokenizer=tokenizer,
+            max_length=config.data.max_length,
+            paratope_path=config.data.paratope_path or None,
+            interface_path=config.data.interface_path or None,
+            germline_path=config.data.germline_path or None,
+            bispecific=config.data.bispecific,
+        )
+    else:
+        full_dataset = AntibodyDataset(
+            data_path=config.data.processed_path,
+            tokenizer=tokenizer,
+            max_length=config.data.max_length,
+            coords_path=config.data.coords_path or None,
+            paratope_path=config.data.paratope_path or None,
+            germline_path=config.data.germline_path or None,
+        )
     eval_size = int(len(full_dataset) * (1 - config.data.train_split))
     _, eval_dataset = torch.utils.data.random_split(
         full_dataset,
