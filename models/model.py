@@ -25,6 +25,16 @@ _SHARED_DEFAULTS = dict(
     pad_token_id=0,
 )
 
+# Defaults for multispecific models with extended vocab and positions
+_MULTISPECIFIC_DEFAULTS = dict(
+    vocab_size=34,  # 30 base + 4 new special tokens ([MOD1], [MOD2], [H], [L])
+    max_position_embeddings=512,  # up from 256 for ~384-token paired sequences
+    hidden_dropout_prob=0.1,
+    attention_probs_dropout_prob=0.1,
+    type_vocab_size=3,  # 0=special, 1=heavy, 2=light (chain-type embeddings)
+    pad_token_id=0,
+)
+
 
 @dataclass
 class ModelSpec:
@@ -76,5 +86,45 @@ def build_model(
         num_attention_heads=spec.num_attention_heads,
         intermediate_size=spec.intermediate_size,
         **_SHARED_DEFAULTS,
+    )
+    return RoFormerForMaskedLM(config)
+
+
+def build_multispecific_model(
+    model_name: str = "alchemab/antiberta2",
+    from_pretrained: bool = False,
+    model_size: str = "medium",
+    num_added_tokens: int = 4,
+) -> RoFormerForMaskedLM:
+    """Build a RoFormer model with extended vocab and positions for multispecific.
+
+    Uses type_vocab_size=3 for chain-type embeddings (special/heavy/light).
+    Module identity is encoded via position + delimiter tokens ([MOD1]/[MOD2]).
+
+    Args:
+        model_name: HuggingFace model identifier.
+        from_pretrained: If True, load pretrained weights and resize embeddings.
+        model_size: One of "small", "medium", "full".
+        num_added_tokens: Number of new special tokens added to the tokenizer.
+
+    Returns:
+        A RoFormerForMaskedLM instance configured for multispecific sequences.
+    """
+    if from_pretrained:
+        model = RoFormerForMaskedLM.from_pretrained(model_name)
+        model.resize_token_embeddings(model.config.vocab_size + num_added_tokens)
+        return model
+
+    if model_size not in MODEL_SPECS:
+        available = ", ".join(sorted(MODEL_SPECS.keys()))
+        raise KeyError(f"Unknown model_size '{model_size}'. Available: {available}")
+
+    spec = MODEL_SPECS[model_size]
+    config = RoFormerConfig(
+        hidden_size=spec.hidden_size,
+        num_hidden_layers=spec.num_hidden_layers,
+        num_attention_heads=spec.num_attention_heads,
+        intermediate_size=spec.intermediate_size,
+        **_MULTISPECIFIC_DEFAULTS,
     )
     return RoFormerForMaskedLM(config)

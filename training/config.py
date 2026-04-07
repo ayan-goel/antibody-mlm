@@ -21,6 +21,9 @@ class DataConfig:
     coords_path: str = ""
     paratope_path: str = ""
     germline_path: str = ""
+    interface_path: str = ""
+    paired: bool = False
+    bispecific: bool = False
 
 
 @dataclass

@@ -48,27 +48,55 @@ def train(config: ExperimentConfig) -> Path:
     """
     set_seed(config.seed)
 
-    logger.info("Loading tokenizer: %s", config.model.model_name)
-    tokenizer = load_tokenizer(config.model.model_name)
+    if config.data.paired:
+        from data.dataset_paired import PairedAntibodyDataset
+        from models.model import build_multispecific_model
+        from utils.tokenizer import load_tokenizer_multispecific
 
-    logger.info("Building model (from_pretrained=%s, model_size=%s)", config.model.from_pretrained, config.model.model_size)
-    model = build_model(
-        model_name=config.model.model_name,
-        from_pretrained=config.model.from_pretrained,
-        model_size=config.model.model_size,
-    )
-    total_params = sum(p.numel() for p in model.parameters())
-    logger.info("Model parameters: %s", f"{total_params:,}")
+        logger.info("Loading multispecific tokenizer: %s", config.model.model_name)
+        tokenizer = load_tokenizer_multispecific(config.model.model_name)
 
-    logger.info("Loading dataset: %s", config.data.processed_path)
-    full_dataset = AntibodyDataset(
-        data_path=config.data.processed_path,
-        tokenizer=tokenizer,
-        max_length=config.data.max_length,
-        coords_path=config.data.coords_path or None,
-        paratope_path=config.data.paratope_path or None,
-        germline_path=config.data.germline_path or None,
-    )
+        logger.info("Building multispecific model (from_pretrained=%s, model_size=%s)", config.model.from_pretrained, config.model.model_size)
+        model = build_multispecific_model(
+            model_name=config.model.model_name,
+            from_pretrained=config.model.from_pretrained,
+            model_size=config.model.model_size,
+        )
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info("Model parameters: %s", f"{total_params:,}")
+
+        logger.info("Loading paired dataset: %s", config.data.processed_path)
+        full_dataset = PairedAntibodyDataset(
+            data_path=config.data.processed_path,
+            tokenizer=tokenizer,
+            max_length=config.data.max_length,
+            paratope_path=config.data.paratope_path or None,
+            interface_path=config.data.interface_path or None,
+            germline_path=config.data.germline_path or None,
+            bispecific=config.data.bispecific,
+        )
+    else:
+        logger.info("Loading tokenizer: %s", config.model.model_name)
+        tokenizer = load_tokenizer(config.model.model_name)
+
+        logger.info("Building model (from_pretrained=%s, model_size=%s)", config.model.from_pretrained, config.model.model_size)
+        model = build_model(
+            model_name=config.model.model_name,
+            from_pretrained=config.model.from_pretrained,
+            model_size=config.model.model_size,
+        )
+        total_params = sum(p.numel() for p in model.parameters())
+        logger.info("Model parameters: %s", f"{total_params:,}")
+
+        logger.info("Loading dataset: %s", config.data.processed_path)
+        full_dataset = AntibodyDataset(
+            data_path=config.data.processed_path,
+            tokenizer=tokenizer,
+            max_length=config.data.max_length,
+            coords_path=config.data.coords_path or None,
+            paratope_path=config.data.paratope_path or None,
+            germline_path=config.data.germline_path or None,
+        )
 
     train_size = int(len(full_dataset) * config.data.train_split)
     eval_size = len(full_dataset) - train_size
