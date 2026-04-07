@@ -27,8 +27,10 @@ from __future__ import annotations
 import argparse
 import ast
 import logging
+import multiprocessing as mp
 import sys
 from collections import Counter, defaultdict
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -293,40 +295,60 @@ def _compute_interface_labels_single(
     return labels
 
 
+def _interface_worker(record: dict, adjacent_label: float = ADJACENT_LABEL) -> tuple:
+    """Worker function for parallel interface label computation.
+
+    Returns plain lists (not tensors) to avoid torch shared memory exhaustion
+    when passing results back through multiprocessing IPC.
+    """
+    vh = record["sequence_heavy"]
+    vl = record["sequence_light"]
+
+    labels_h = _compute_interface_labels_single(vh, VH_INTERFACE_IMGT, adjacent_label)
+    labels_l = _compute_interface_labels_single(vl, VL_INTERFACE_IMGT, adjacent_label)
+
+    if labels_h is not None and labels_l is not None:
+        return (labels_h.tolist(), labels_l.tolist(), True)
+    else:
+        return ([0.0] * len(vh), [0.0] * len(vl), False)
+
+
 def compute_interface_labels(
     records: list[dict],
     adjacent_label: float = ADJACENT_LABEL,
+    num_workers: int = 0,
 ) -> list[dict | None]:
-    """Compute VH-VL interface labels for all paired records."""
-    results: list[dict | None] = [None] * len(records)
+    """Compute VH-VL interface labels for all paired records.
+
+    Uses multiprocessing when num_workers > 0 to parallelize ANARCI calls.
+    """
+    if num_workers <= 0:
+        num_workers = min(mp.cpu_count(), 48)
+
+    worker_fn = partial(_interface_worker, adjacent_label=adjacent_label)
+
+    logger.info("[Interface] Using %d workers for %d records", num_workers, len(records))
+
+    results: list[dict | None] = []
     n_success = 0
     n_fallback = 0
 
-    for i, record in enumerate(records):
-        vh = record["sequence_heavy"]
-        vl = record["sequence_light"]
+    with mp.Pool(num_workers) as pool:
+        for i, (lh, ll, success) in enumerate(pool.imap(worker_fn, records, chunksize=512)):
+            if success:
+                n_success += 1
+            else:
+                n_fallback += 1
+            results.append({
+                "interface_labels_heavy": torch.tensor(lh, dtype=torch.float),
+                "interface_labels_light": torch.tensor(ll, dtype=torch.float),
+            })
 
-        labels_h = _compute_interface_labels_single(vh, VH_INTERFACE_IMGT, adjacent_label)
-        labels_l = _compute_interface_labels_single(vl, VL_INTERFACE_IMGT, adjacent_label)
-
-        if labels_h is not None and labels_l is not None:
-            results[i] = {
-                "interface_labels_heavy": labels_h,
-                "interface_labels_light": labels_l,
-            }
-            n_success += 1
-        else:
-            results[i] = {
-                "interface_labels_heavy": torch.zeros(len(vh), dtype=torch.float),
-                "interface_labels_light": torch.zeros(len(vl), dtype=torch.float),
-            }
-            n_fallback += 1
-
-        if (i + 1) % 10000 == 0:
-            logger.info(
-                "[Interface] %d / %d (success: %d, fallback: %d)",
-                i + 1, len(records), n_success, n_fallback,
-            )
+            if (i + 1) % 10000 == 0:
+                logger.info(
+                    "[Interface] %d / %d (success: %d, fallback: %d)",
+                    i + 1, len(records), n_success, n_fallback,
+                )
 
     logger.info(
         "[Interface] Done: %d records (success: %d, ANARCI fallback: %d)",

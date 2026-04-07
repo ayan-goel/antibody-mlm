@@ -29,30 +29,76 @@ OAS_PAIRED_SEARCH_URL = "https://opig.stats.ox.ac.uk/webapps/oas/oas_paired/"
 
 def search_oas_paired(
     species: str = "human",
-    max_results: int = 10,
+    max_results: int = 200,
 ) -> list[str]:
     """Query the OAS paired search endpoint and return download URLs.
 
-    Falls back to a curated list of known human paired data-unit URLs
+    Falls back to a curated list of verified human paired data-unit URLs
     if the search endpoint is unavailable.
     """
+    # Verified URLs from the largest OAS paired studies (as of 2026-04).
+    # Jaffe_2022 (~1.4M seqs, 94 units) and Wang_2023 (~192K, 26 units)
+    # together easily cover 500K+ sequences.
     fallback_urls = [
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/SRR18038399_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/SRR18038400_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/SRR18038401_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/SRR18038402_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/SRR18038403_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Krebs_2022/csv/SRR17402429_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Krebs_2022/csv/SRR17402430_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Krebs_2022/csv/SRR17402431_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Krebs_2022/csv/SRR17402432_Paired_All.csv.gz",
-        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Krebs_2022/csv/SRR17402433_Paired_All.csv.gz",
+        # Jaffe_2022 — largest paired study (~15K seqs per unit)
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279049_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279050_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279051_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279052_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279053_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279054_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279055_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279056_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279057_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279058_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279059_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279060_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279061_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279062_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279063_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279064_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279065_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279066_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279067_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279068_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279069_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279070_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279071_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279072_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279073_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279074_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279075_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279076_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279077_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279078_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279079_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279080_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279081_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279082_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279083_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279084_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279085_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279086_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279087_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Jaffe_2022/csv/1279088_1_Paired_All.csv.gz",
+        # Wang_2023 — large paired study (~7.4K seqs per unit)
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279283_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279284_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279285_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279286_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279287_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279288_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279289_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279290_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279291_1_Paired_All.csv.gz",
+        "https://opig.stats.ox.ac.uk/webapps/ngsdb/paired/Wang_2023/csv_paired/SRR22279292_1_Paired_All.csv.gz",
     ]
 
     try:
         response = requests.post(
             OAS_PAIRED_SEARCH_URL,
-            data={"species": species},
+            data={"Species": species, "Age": "*", "BSource": "*", "BType": "*",
+                  "Vaccine": "*", "Disease": "*", "Subject": "*", "Longitudinal": "*"},
             timeout=30,
         )
         response.raise_for_status()
@@ -138,7 +184,7 @@ def parse_paired_data_unit(path: Path) -> tuple[dict[str, Any], list[dict[str, s
 def download_paired_subset(
     output_dir: str | Path,
     species: str = "human",
-    max_files: int = 10,
+    max_files: int = 100,
     max_sequences: int = 500_000,
 ) -> list[dict[str, str]]:
     """Download and parse a subset of OAS paired data.

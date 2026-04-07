@@ -118,6 +118,17 @@ def train(config: ExperimentConfig) -> Path:
     )
     collator = MLMDataCollator(tokenizer=tokenizer, strategy=strategy)
 
+    # Wire curriculum callback for hybrid masking
+    hybrid_callback = None
+    try:
+        from masking.hybrid import HybridMasking
+        from training.callbacks import HybridMaskingCallback
+        if isinstance(strategy, HybridMasking):
+            hybrid_callback = HybridMaskingCallback(strategy)
+            logger.info("Hybrid masking curriculum callback registered")
+    except ImportError:
+        pass
+
     output_dir = Path(config.training.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -153,6 +164,9 @@ def train(config: ExperimentConfig) -> Path:
             )
         )
         logger.info("Early stopping enabled (patience=%d evals)", config.training.early_stopping_patience)
+
+    if hybrid_callback is not None:
+        callbacks.append(hybrid_callback)
 
     trainer = Trainer(
         model=model,

@@ -1,0 +1,66 @@
+seed: 42
+
+data:
+  processed_path: "data/processed/oas_vh_500k.jsonl"
+  max_length: 160
+  min_length: 80
+  train_split: 0.9
+  valid_amino_acids: "ACDEFGHIKLMNPQRSTVWY"
+  coords_path: "data/structures/oas_vh_500k_coords.pt"
+  paratope_path: "data/structures/oas_vh_500k_paratope.pt"
+  germline_path: "data/structures/oas_vh_500k_germline.pt"
+
+masking:
+  strategy: "hybrid"
+  mask_prob: 0.15
+  mask_token_ratio: 0.8
+  random_token_ratio: 0.1
+  params:
+    sub_strategies: ["uniform", "cdr", "span", "structure", "interface", "germline"]
+    policy_weights: [0.30, 0.15, 0.30, 0.10, 0.10, 0.05]
+    sub_strategy_params:
+      cdr:
+        cdr3_weight: 6.0
+      span:
+        geometric_p: 0.2
+        max_span_length: 10
+      structure:
+        k_neighbors: 32
+      interface:
+        paratope_weight: 6.0
+      germline:
+        mutated_weight: 6.0
+    # 4-stage curriculum schedule with linear interpolation between breakpoints.
+    #   Stage 1 (0-5k): general antibody syntax — heavy uniform + span
+    #   Stage 2 (5k-15k): binding-site specialization — increase CDR + interface
+    #   Stage 3 (15k-25k): mutation realism — increase germline
+    #   Stage 4 (25k+): balanced final mixture
+    curriculum:
+      - step: 0
+        weights: [0.30, 0.15, 0.30, 0.10, 0.10, 0.05]
+      - step: 5000
+        weights: [0.10, 0.30, 0.10, 0.15, 0.25, 0.10]
+      - step: 15000
+        weights: [0.10, 0.20, 0.10, 0.15, 0.20, 0.25]
+      - step: 25000
+        weights: [0.10, 0.20, 0.10, 0.15, 0.20, 0.25]
+
+model:
+  model_name: "alchemab/antiberta2"
+  from_pretrained: false
+  model_size: "medium"
+
+training:
+  output_dir: "models/checkpoints/hybrid_curriculum_medium"
+  batch_size: 32
+  learning_rate: 5.0e-5
+  num_epochs: 20
+  warmup_steps: 1000
+  weight_decay: 0.01
+  logging_steps: 100
+  save_steps: 2000
+  eval_steps: 1000
+  fp16: true
+  dataloader_num_workers: 4
+  gradient_accumulation_steps: 2
+  early_stopping_patience: 5

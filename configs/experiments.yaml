@@ -23,6 +23,15 @@ experiments:
   multispecific_medium:
     config: configs/multispecific_medium.yaml
     checkpoint: models/checkpoints/multispecific_medium/final
+  hybrid_medium:
+    config: configs/hybrid_medium.yaml
+    checkpoint: models/checkpoints/hybrid_medium/final
+  hybrid_curriculum_medium:
+    config: configs/hybrid_curriculum_medium.yaml
+    checkpoint: models/checkpoints/hybrid_curriculum_medium/final
+  hybrid_paired_medium:
+    config: configs/hybrid_paired_medium.yaml
+    checkpoint: models/checkpoints/hybrid_paired_medium/final
 
 # Downstream task configs applied to every experiment checkpoint.
 downstream_tasks:

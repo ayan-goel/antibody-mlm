@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument(
         "--max-files",
         type=int,
-        default=10,
+        default=100,
         help="Max number of OAS paired data-units to download",
     )
     parser.add_argument(

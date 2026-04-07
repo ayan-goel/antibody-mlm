@@ -8,6 +8,7 @@ import masking.structure  # noqa: F401 — triggers registration
 import masking.interface  # noqa: F401 — triggers registration
 import masking.germline  # noqa: F401 — triggers registration
 import masking.multispecific  # noqa: F401 — triggers registration
+import masking.hybrid  # noqa: F401 — triggers registration
 
 __all__ = [
     "BaseMaskingStrategy",
