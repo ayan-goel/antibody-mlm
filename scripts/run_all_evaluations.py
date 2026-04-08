@@ -254,9 +254,17 @@ def _run_downstream(
     checkpoint: str,
     downstream_configs: list[str],
     device: str,
+    existing_results: dict[str, dict] | None = None,
+    on_task_complete: callable | None = None,
 ) -> dict[str, dict]:
-    """Run all downstream tasks for a checkpoint."""
-    results: dict[str, dict] = {}
+    """Run all downstream tasks for a checkpoint.
+
+    ``existing_results`` lets a resumed run skip tasks that already
+    completed (non-empty dicts without an error marker).
+    ``on_task_complete`` is invoked after each task finishes so the caller
+    can persist incremental progress.
+    """
+    results: dict[str, dict] = dict(existing_results or {})
     for cfg_path in downstream_configs:
         cfg_path = Path(cfg_path)
         if not cfg_path.exists():
@@ -264,6 +272,12 @@ def _run_downstream(
             continue
 
         base_config = load_downstream_config(cfg_path)
+        task_name = base_config.task
+        existing = results.get(task_name)
+        if (isinstance(existing, dict) and not existing.get("error") and existing):
+            logger.info("  [Downstream] Task '%s' already complete, skipping", task_name)
+            continue
+
         per_experiment_output = str(Path(base_config.output_dir) / experiment_name)
         config = DownstreamConfig(
             task=base_config.task,
@@ -292,6 +306,8 @@ def _run_downstream(
         except Exception:
             logger.exception("  Failed to run downstream task %s", config.task)
             results[config.task] = {"error": True, "task": config.task, "mode": config.mode}
+        if on_task_complete is not None:
+            on_task_complete(results)
     return results
 
 
@@ -346,12 +362,32 @@ def run_experiment(
         generator=torch.Generator().manual_seed(config.seed),
     )
 
-    all_metrics: dict = {
+    # Set up the output path and load any existing results so crashed/killed
+    # runs can resume from where they stopped. The merge logic at the bottom
+    # of this function preserves valid sections and overwrites only the ones
+    # we've re-run.
+    output_dir = Path(args.output_dir) / name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / "all_metrics.json"
+
+    if out_path.exists():
+        with out_path.open() as f:
+            all_metrics: dict = json.load(f)
+    else:
+        all_metrics = {}
+    all_metrics.update({
         "experiment": name,
         "config": config_path,
         "checkpoint": checkpoint_path,
         "num_eval_samples": len(eval_dataset),
-    }
+    })
+
+    def _save_progress() -> None:
+        """Write the current all_metrics state to disk for incremental progress."""
+        with out_path.open("w") as f:
+            json.dump(all_metrics, f, indent=2, default=str)
+
+    _save_progress()  # create the file early so progress is visible
 
     eval_sections: list[tuple[str, bool, callable]] = [
         ("mlm", not args.skip_mlm, lambda: _run_mlm_eval(
@@ -386,11 +422,21 @@ def run_experiment(
     for section_name, should_run, run_fn in eval_sections:
         if not should_run:
             continue
+        # Skip sections that already succeeded in a previous run, identified
+        # by the absence of an error marker. This lets you resume after a
+        # crash without redoing expensive sections like mutations.
+        existing_section = all_metrics.get(section_name)
+        if (isinstance(existing_section, dict)
+                and "error" not in existing_section
+                and existing_section):
+            logger.info("  [%s] Already present in all_metrics.json, skipping", section_name)
+            continue
         try:
             all_metrics[section_name] = run_fn()
         except Exception:
             logger.exception("  Section '%s' failed -- continuing with remaining sections", section_name)
             all_metrics[section_name] = {"error": "section failed, see logs"}
+        _save_progress()
 
     del model
     try:
@@ -399,33 +445,30 @@ def run_experiment(
         logger.warning("  torch.cuda.empty_cache() failed (CUDA context may be corrupted)")
 
     if not args.skip_downstream:
+        # Resume: pass any previously-completed per-task downstream results
+        # into _run_downstream so it can skip them. Each task-complete
+        # callback updates all_metrics and flushes to disk.
+        existing_downstream = all_metrics.get("downstream")
+        if not isinstance(existing_downstream, dict) or "error" in existing_downstream:
+            existing_downstream = {}
+
+        def _on_downstream_task_complete(partial: dict) -> None:
+            all_metrics["downstream"] = dict(partial)
+            _save_progress()
+
         try:
             downstream_results = _run_downstream(
                 name, checkpoint_path, downstream_configs, args.device,
+                existing_results=existing_downstream,
+                on_task_complete=_on_downstream_task_complete,
             )
             all_metrics["downstream"] = downstream_results
         except Exception:
             logger.exception("  Downstream tasks failed")
             all_metrics["downstream"] = {"error": "downstream failed, see logs"}
+        _save_progress()
 
-    output_dir = Path(args.output_dir) / name
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / "all_metrics.json"
-
-    if out_path.exists():
-        with out_path.open() as f:
-            existing = json.load(f)
-        for key, value in all_metrics.items():
-            if key in ("experiment", "config", "checkpoint", "num_eval_samples"):
-                existing[key] = value
-            elif value not in (None, {"error": "section failed, see logs"}):
-                existing[key] = value
-        all_metrics = existing
-
-    with out_path.open("w") as f:
-        json.dump(all_metrics, f, indent=2, default=str)
     logger.info("All metrics saved to %s", out_path)
-
     return all_metrics
 
 

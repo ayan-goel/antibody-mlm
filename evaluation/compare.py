@@ -96,6 +96,7 @@ def discover_experiments(
                 all_metrics = json.load(f)
             exp = _ensure(name)
             exp.all_metrics = all_metrics
+            _unpack_all_metrics(exp, all_metrics)
 
     _discover_downstream(downstream_dir, experiments)
 
@@ -103,11 +104,63 @@ def discover_experiments(
     return experiments
 
 
+def _unpack_all_metrics(
+    exp: ExperimentResult, all_metrics: dict[str, Any],
+) -> None:
+    """Unpack the sections of an ``all_metrics.json`` into ExperimentResult fields.
+
+    ``run_all_evaluations.py`` writes every evaluation section (mlm,
+    infilling, pll, perplexity, infilling_quality, mutation_benchmark,
+    downstream) into a single ``all_metrics.json``. The report-generation
+    code, however, reads from separate legacy fields (eval_metrics,
+    zeroshot_metrics, mutation_metrics, downstream_metrics). This helper
+    populates those legacy fields from the unified file so that
+    ``build_comparison_table`` and ``_get_metric`` find the data.
+    """
+    mlm = all_metrics.get("mlm")
+    if isinstance(mlm, dict) and "error" not in mlm:
+        if exp.eval_metrics is None:
+            exp.eval_metrics = {}
+        exp.eval_metrics.update(mlm)
+
+    # Zero-shot metrics: merge infilling, pll, perplexity, infilling_quality,
+    # and also include MLM's perplexity_* keys (since report.py's
+    # _ZEROSHOT_METRICS includes perplexity_overall/cdr/cdr3).
+    zs: dict[str, Any] = {}
+    for section_name in ("mlm", "infilling", "pll", "perplexity", "infilling_quality"):
+        section = all_metrics.get(section_name)
+        if isinstance(section, dict) and "error" not in section:
+            zs.update(section)
+    if zs:
+        if exp.zeroshot_metrics is None:
+            exp.zeroshot_metrics = {}
+        exp.zeroshot_metrics.update(zs)
+
+    mut = all_metrics.get("mutation_benchmark")
+    if isinstance(mut, dict) and "error" not in mut:
+        if exp.mutation_metrics is None:
+            exp.mutation_metrics = {}
+        exp.mutation_metrics.update(mut)
+
+    downstream = all_metrics.get("downstream")
+    if isinstance(downstream, dict) and "error" not in downstream:
+        for task_name, task_results in downstream.items():
+            if isinstance(task_results, dict) and not task_results.get("error"):
+                exp.downstream_metrics[task_name] = task_results
+
+
 def _discover_downstream(
     downstream_dir: Path,
     experiments: dict[str, ExperimentResult],
 ) -> None:
-    """Scan downstream_outputs for task results and match to experiments by checkpoint path."""
+    """Scan downstream_outputs for task results and match to experiments by checkpoint path.
+
+    Looks for results at ``downstream_outputs/<experiment>/<task>_<mode>/results.json``
+    (the layout written by :meth:`BaseDownstreamTask.run`). Only fills in
+    downstream metrics for experiments whose ``downstream_metrics`` dict
+    hasn't already been populated from ``all_metrics.json`` — the batch
+    runner's unified file takes priority.
+    """
     if not downstream_dir.exists():
         return
 
@@ -116,8 +169,9 @@ def _discover_downstream(
         if exp.checkpoint_dir is not None:
             checkpoint_to_name[str(exp.checkpoint_dir)] = name
 
-    for results_path in sorted(downstream_dir.glob("*/results.json")):
+    for results_path in sorted(downstream_dir.glob("*/*/results.json")):
         task_dir_name = results_path.parent.name
+        experiment_dir_name = results_path.parent.parent.name
         with results_path.open() as f:
             results = json.load(f)
 
@@ -125,17 +179,16 @@ def _discover_downstream(
         task_name = results.get("task", task_dir_name)
 
         matched_name: str | None = None
-        for ckpt_path, exp_name in checkpoint_to_name.items():
-            if checkpoint and (checkpoint in ckpt_path or ckpt_path in checkpoint):
-                matched_name = exp_name
-                break
-
+        # 1. Match by experiment directory name (most reliable).
+        if experiment_dir_name in experiments:
+            matched_name = experiment_dir_name
+        # 2. Match by checkpoint path.
         if matched_name is None:
-            for exp_name in experiments:
-                if exp_name in task_dir_name:
+            for ckpt_path, exp_name in checkpoint_to_name.items():
+                if checkpoint and (checkpoint in ckpt_path or ckpt_path in checkpoint):
                     matched_name = exp_name
                     break
-
+        # 3. Last-resort: substring match of experiment names in checkpoint.
         if matched_name is None:
             for exp_name in experiments:
                 if exp_name in checkpoint:
@@ -143,7 +196,9 @@ def _discover_downstream(
                     break
 
         if matched_name is not None:
-            experiments[matched_name].downstream_metrics[task_name] = results
+            # all_metrics.json wins if it already populated this task.
+            if task_name not in experiments[matched_name].downstream_metrics:
+                experiments[matched_name].downstream_metrics[task_name] = results
 
 
 _EVAL_KEYS = [
