@@ -24,14 +24,26 @@ from masking.collator import MLMDataCollator
 logger = logging.getLogger(__name__)
 
 
-def _save_cache_meta(cache_path: Path, checkpoint_path: str) -> None:
+def _save_cache_meta(
+    cache_path: Path, checkpoint_path: str, tokenizer_type: str = "standard",
+) -> None:
     """Write a sidecar metadata file alongside the embedding cache."""
     meta_path = cache_path.with_suffix(cache_path.suffix + ".meta")
-    meta_path.write_text(json.dumps({"checkpoint_path": checkpoint_path}))
+    meta_path.write_text(json.dumps({
+        "checkpoint_path": checkpoint_path,
+        "tokenizer_type": tokenizer_type,
+    }))
 
 
-def cache_is_valid(cache_path: str | Path, checkpoint_path: str) -> bool:
-    """Check if a cache file exists and was generated from the given checkpoint."""
+def cache_is_valid(
+    cache_path: str | Path, checkpoint_path: str, tokenizer_type: str = "standard",
+) -> bool:
+    """Check if a cache file exists and matches the given checkpoint + tokenizer.
+
+    A cache is considered invalid if the checkpoint path or the tokenizer
+    type (standard vs paired multispecific) differs from when it was
+    generated. Legacy caches without a sidecar meta file are also invalid.
+    """
     cache_path = Path(cache_path)
     if not cache_path.exists():
         return False
@@ -40,7 +52,10 @@ def cache_is_valid(cache_path: str | Path, checkpoint_path: str) -> bool:
         return False  # legacy cache without meta — treat as invalid
     try:
         meta = json.loads(meta_path.read_text())
-        return meta.get("checkpoint_path", "") == checkpoint_path
+        if meta.get("checkpoint_path", "") != checkpoint_path:
+            return False
+        # Missing tokenizer_type in legacy meta files → assume "standard"
+        return meta.get("tokenizer_type", "standard") == tokenizer_type
     except Exception:
         return False
 
@@ -54,6 +69,7 @@ def extract_and_cache(
     num_workers: int = 4,
     device: str = "cuda",
     checkpoint_path: str = "",
+    tokenizer_type: str = "standard",
 ) -> Path:
     """Extract per-token embeddings and save to disk.
 
@@ -114,7 +130,7 @@ def extract_and_cache(
         cache_path,
     )
     if checkpoint_path:
-        _save_cache_meta(cache_path, checkpoint_path)
+        _save_cache_meta(cache_path, checkpoint_path, tokenizer_type)
     logger.info("Cached %d samples to %s", sum(m.size(0) for m in all_masks), cache_path)
     return cache_path
 

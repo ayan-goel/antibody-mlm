@@ -18,6 +18,8 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 
+from utils.tokenizer import tokenize_single_chain
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,23 +51,20 @@ class ParatopeDataset(Dataset):
         sequence = self.sequences[idx]
         paratope_set = set(self.paratope_indices[idx])
 
-        spaced = " ".join(list(sequence))
-        encoding = self.tokenizer(
-            spaced,
-            truncation=True,
-            max_length=self.max_length,
-            padding=False,
-            return_special_tokens_mask=True,
-        )
+        encoding = tokenize_single_chain(self.tokenizer, sequence, self.max_length)
 
+        # Map per-AA labels to token positions using special_tokens_mask.
+        # Works for both standard ([CLS] VH [SEP]) and paired
+        # ([CLS][MOD1][H] VH [SEP]) tokenizations.
         num_tokens = len(encoding["input_ids"])
         labels = [-100] * num_tokens
-
-        for aa_idx in range(len(sequence)):
-            token_pos = aa_idx + 1  # +1 for [CLS]
-            if token_pos >= num_tokens - 1:
-                break
-            labels[token_pos] = 1 if aa_idx in paratope_set else 0
+        aa_idx = 0
+        for token_pos, is_special in enumerate(encoding["special_tokens_mask"]):
+            if is_special:
+                continue
+            if aa_idx < len(sequence):
+                labels[token_pos] = 1 if aa_idx in paratope_set else 0
+            aa_idx += 1
 
         return {
             "input_ids": encoding["input_ids"],

@@ -20,6 +20,8 @@ import torch
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 
+from utils.tokenizer import tokenize_single_chain
+
 logger = logging.getLogger(__name__)
 
 TAP_LABEL_NAMES = ["CDR_Length", "PSH", "PPC", "PNC", "SFvCSP"]
@@ -68,14 +70,7 @@ class DevelopabilityDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sequence = self.sequences[idx]
-        spaced = " ".join(list(sequence))
-        encoding = self.tokenizer(
-            spaced,
-            truncation=True,
-            max_length=self.max_length,
-            padding=False,
-            return_special_tokens_mask=True,
-        )
+        encoding = tokenize_single_chain(self.tokenizer, sequence, self.max_length)
         return {
             "input_ids": encoding["input_ids"],
             "attention_mask": encoding["attention_mask"],

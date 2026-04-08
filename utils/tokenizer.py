@@ -29,6 +29,70 @@ def tokenize_sequence(sequence: str, tokenizer: PreTrainedTokenizerBase) -> str:
     return " ".join(list(sequence))
 
 
+def is_paired_checkpoint(checkpoint_path: str) -> bool:
+    """Return True if the given checkpoint was trained with the paired
+    multispecific tokenizer (vocab_size large enough to include the
+    [MOD1]/[MOD2]/[H]/[L] special tokens at IDs 28-31).
+
+    Single-chain antiberta2 checkpoints have vocab_size 28-30 (sometimes
+    padded for alignment); paired checkpoints have vocab_size >= 32.
+    """
+    from transformers import RoFormerConfig
+
+    cfg = RoFormerConfig.from_pretrained(checkpoint_path)
+    return cfg.vocab_size >= 32
+
+
+def load_tokenizer_for_checkpoint(
+    checkpoint_path: str, model_name: str = ANTIBERTA2_MODEL_NAME,
+) -> PreTrainedTokenizerBase:
+    """Load the tokenizer matching the checkpoint's training setup.
+
+    Paired checkpoints get the multispecific tokenizer (with [MOD1]/[H]/[L]
+    framing tokens); single-chain checkpoints get the standard tokenizer.
+    """
+    if is_paired_checkpoint(checkpoint_path):
+        return load_tokenizer_multispecific(model_name)
+    return load_tokenizer(model_name)
+
+
+def tokenize_single_chain(
+    tokenizer: PreTrainedTokenizerBase,
+    sequence: str,
+    max_length: int,
+) -> dict:
+    """Tokenize a single VH (or single-chain) sequence.
+
+    If the tokenizer has the multispecific framing tokens ([MOD1]/[H]/[L]),
+    produces ``[CLS] [MOD1] [H] VH... [SEP]`` via :func:`encode_multispecific`
+    so that paired models see the framing tokens they were trained with.
+    Otherwise produces the standard ``[CLS] VH... [SEP]`` via the plain
+    tokenizer call.
+
+    Returns a dict with ``input_ids``, ``attention_mask``, and
+    ``special_tokens_mask`` (matching the HuggingFace tokenizer format).
+    """
+    additional = tokenizer.additional_special_tokens or []
+    if "[MOD1]" in additional:
+        enc = encode_multispecific(
+            vh_1=sequence, vl_1=None,
+            tokenizer=tokenizer, max_length=max_length,
+        )
+        return {
+            "input_ids": enc["input_ids"],
+            "attention_mask": enc["attention_mask"],
+            "special_tokens_mask": enc["special_tokens_mask"],
+        }
+    spaced = " ".join(list(sequence))
+    return tokenizer(
+        spaced,
+        truncation=True,
+        max_length=max_length,
+        padding=False,
+        return_special_tokens_mask=True,
+    )
+
+
 def load_tokenizer_multispecific(
     model_name: str = ANTIBERTA2_MODEL_NAME,
 ) -> PreTrainedTokenizerBase:
@@ -46,7 +110,7 @@ def load_tokenizer_multispecific(
 
 def encode_multispecific(
     vh_1: str,
-    vl_1: str,
+    vl_1: str | None,
     vh_2: str | None = None,
     vl_2: str | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
@@ -56,6 +120,10 @@ def encode_multispecific(
 
     Monospecific paired (K=1):
       [CLS] [MOD1] [H] VH_1... [SEP] [L] VL_1... [SEP]
+
+    Heavy-chain only (vl_1=None, used for evaluating paired models on
+    single-chain benchmarks):
+      [CLS] [MOD1] [H] VH_1... [SEP]
 
     Bispecific (K=2):
       [CLS] [MOD1] [H] VH_1... [SEP] [L] VL_1... [SEP]
@@ -87,7 +155,7 @@ def encode_multispecific(
         return tokenizer.encode(spaced, add_special_tokens=False)
 
     vh1_ids = _tokenize_chain(vh_1)
-    vl1_ids = _tokenize_chain(vl_1)
+    vl1_ids = _tokenize_chain(vl_1) if vl_1 is not None else None
 
     # Build token sequence and metadata arrays
     input_ids: list[int] = []
@@ -116,13 +184,15 @@ def encode_multispecific(
     _append_special(cls_id, 0, 0)
 
     # Module 1: [MOD1] [H] VH_1... [SEP] [L] VL_1... [SEP]
+    # (If vl_1 is None, the light-chain section is omitted entirely.)
     _append_special(mod1_id, 1, 0)
     _append_special(h_id, 1, 0)
     _append_chain(vh1_ids, 1, 1, "heavy")
     _append_special(sep_id, 1, 0)
-    _append_special(l_id, 1, 0)
-    _append_chain(vl1_ids, 1, 2, "light")
-    _append_special(sep_id, 1, 0)
+    if vl1_ids is not None:
+        _append_special(l_id, 1, 0)
+        _append_chain(vl1_ids, 1, 2, "light")
+        _append_special(sep_id, 1, 0)
 
     # Module 2 (bispecific): [MOD2] [H] VH_2... [SEP] [L] VL_2... [SEP]
     if vh_2 is not None and vl_2 is not None:

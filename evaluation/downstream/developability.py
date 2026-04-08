@@ -21,7 +21,7 @@ from data.benchmarks.developability import LabelScaler, load_developability_spli
 from evaluation.downstream import register_task
 from evaluation.downstream.base import BaseDownstreamTask
 from evaluation.downstream.heads import RegressionHead
-from utils.tokenizer import load_tokenizer
+from utils.tokenizer import load_tokenizer_for_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,9 @@ class DevelopabilityTask(BaseDownstreamTask):
     _label_names: list[str] | None = None
 
     def load_data(self) -> tuple[Dataset, Dataset, Dataset]:
-        tokenizer = load_tokenizer(self.config.model_name)
+        tokenizer = load_tokenizer_for_checkpoint(
+            self.config.checkpoint, self.config.model_name,
+        )
         train, val, test, label_names, scaler = load_developability_splits(
             tokenizer, max_length=160,
         )

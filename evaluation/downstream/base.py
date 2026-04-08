@@ -18,8 +18,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
-from transformers import RoFormerConfig
-
 from evaluation.downstream.config import DownstreamConfig
 from evaluation.downstream.embedding_cache import (
     CachedEmbeddingDataset, cache_is_valid, extract_and_cache,
@@ -27,7 +25,7 @@ from evaluation.downstream.embedding_cache import (
 from evaluation.downstream.encoder import EncoderWrapper
 from evaluation.downstream.trainer import DownstreamTrainer
 from utils.seed import set_seed
-from utils.tokenizer import load_tokenizer
+from utils.tokenizer import is_paired_checkpoint, load_tokenizer_for_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +93,14 @@ class BaseDownstreamTask(ABC):
             len(train_data), len(val_data), len(test_data),
         )
 
-        tokenizer = load_tokenizer(self.config.model_name)
-
-        checkpoint_config = RoFormerConfig.from_pretrained(self.config.checkpoint)
-        if checkpoint_config.vocab_size > len(tokenizer):
-            logger.warning(
-                "Paired model checkpoint (vocab_size=%d) evaluated with standard "
-                "tokenizer (vocab_size=%d) for downstream tasks. The encoder will "
-                "produce meaningful hidden states for standard tokens but won't see "
-                "paired framing tokens ([MOD1], [H], [L]). This is expected for "
-                "single-chain downstream benchmarks.",
-                checkpoint_config.vocab_size, len(tokenizer),
+        tokenizer = load_tokenizer_for_checkpoint(
+            self.config.checkpoint, self.config.model_name,
+        )
+        if is_paired_checkpoint(self.config.checkpoint):
+            logger.info(
+                "Paired checkpoint detected: downstream inputs will be tokenized "
+                "with the multispecific tokenizer ([CLS][MOD1][H] VH [SEP] format) "
+                "so the model sees its trained framing tokens."
             )
 
         trainer = DownstreamTrainer(self.config)
@@ -124,30 +119,31 @@ class BaseDownstreamTask(ABC):
             test_cache = cache_dir / "test.pt"
 
             ckpt = self.config.checkpoint
+            tok_type = "paired" if is_paired_checkpoint(ckpt) else "standard"
             needs_caching = not (
-                cache_is_valid(train_cache, ckpt)
-                and cache_is_valid(val_cache, ckpt)
-                and cache_is_valid(test_cache, ckpt)
+                cache_is_valid(train_cache, ckpt, tok_type)
+                and cache_is_valid(val_cache, ckpt, tok_type)
+                and cache_is_valid(test_cache, ckpt, tok_type)
             )
             if needs_caching:
                 encoder = EncoderWrapper.from_checkpoint(
                     self.config.checkpoint, device=self.config.device,
                 )
-                if not cache_is_valid(train_cache, ckpt):
+                if not cache_is_valid(train_cache, ckpt, tok_type):
                     logger.info("Caching train embeddings...")
                     extract_and_cache(encoder, train_data, tokenizer, train_cache,
                                       batch_size=self.config.batch_size, device=self.config.device,
-                                      checkpoint_path=ckpt)
-                if not cache_is_valid(val_cache, ckpt):
+                                      checkpoint_path=ckpt, tokenizer_type=tok_type)
+                if not cache_is_valid(val_cache, ckpt, tok_type):
                     logger.info("Caching val embeddings...")
                     extract_and_cache(encoder, val_data, tokenizer, val_cache,
                                       batch_size=self.config.batch_size, device=self.config.device,
-                                      checkpoint_path=ckpt)
-                if not cache_is_valid(test_cache, ckpt):
+                                      checkpoint_path=ckpt, tokenizer_type=tok_type)
+                if not cache_is_valid(test_cache, ckpt, tok_type):
                     logger.info("Caching test embeddings...")
                     extract_and_cache(encoder, test_data, tokenizer, test_cache,
                                       batch_size=self.config.batch_size, device=self.config.device,
-                                      checkpoint_path=ckpt)
+                                      checkpoint_path=ckpt, tokenizer_type=tok_type)
                 del encoder
                 torch.cuda.empty_cache()
                 logger.info("Encoder freed after caching embeddings")

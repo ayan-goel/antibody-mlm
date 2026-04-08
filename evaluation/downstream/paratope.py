@@ -26,7 +26,7 @@ from data.benchmarks.paratope import compute_class_weight, load_paratope_splits
 from evaluation.downstream import register_task
 from evaluation.downstream.base import BaseDownstreamTask
 from evaluation.downstream.heads import TokenClassificationHead
-from utils.tokenizer import load_tokenizer
+from utils.tokenizer import load_tokenizer_for_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,9 @@ class ParatopePredictionTask(BaseDownstreamTask):
     _cached_pos_weight: float | None = None
 
     def load_data(self) -> tuple[Dataset, Dataset, Dataset]:
-        tokenizer = load_tokenizer(self.config.model_name)
+        tokenizer = load_tokenizer_for_checkpoint(
+            self.config.checkpoint, self.config.model_name,
+        )
         train, val, test = load_paratope_splits(tokenizer, max_length=160)
         self._train_data = train
         self._cached_pos_weight = compute_class_weight(train)

@@ -4,6 +4,6 @@ mode: probe
 learning_rate: 1.0e-3
 epochs: 100
 batch_size: 16
-early_stopping_patience: 15
+early_stopping_patience: 0
 num_seeds: 5
 output_dir: downstream_outputs
