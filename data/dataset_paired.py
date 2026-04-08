@@ -12,6 +12,45 @@ from utils.io import load_jsonl
 from utils.tokenizer import encode_multispecific
 
 
+PAIRED_CDR_FIELDS_HEAVY = {
+    "cdr1_aa_heavy": 1,
+    "cdr2_aa_heavy": 2,
+    "cdr3_aa_heavy": 3,
+}
+
+PAIRED_CDR_FIELDS_LIGHT = {
+    "cdr1_aa_light": 1,
+    "cdr2_aa_light": 2,
+    "cdr3_aa_light": 3,
+}
+
+
+def _build_cdr_region_labels_chain(
+    sequence: str, cdr_fields: dict[str, int], record: dict,
+) -> list[int]:
+    """Build per-residue CDR region labels for a single chain.
+
+    Same logic as dataset.py:_build_cdr_region_labels but parameterized
+    for chain-specific CDR field names.
+
+    Returns a list of length len(sequence) where 0=framework,
+    1=CDR1, 2=CDR2, 3=CDR3.
+    """
+    labels = [0] * len(sequence)
+    search_start = 0
+    for field, region_id in cdr_fields.items():
+        cdr_seq = record.get(field, "")
+        if not cdr_seq:
+            continue
+        idx = sequence.find(cdr_seq, search_start)
+        if idx == -1:
+            continue
+        for i in range(idx, idx + len(cdr_seq)):
+            labels[i] = region_id
+        search_start = idx + len(cdr_seq)
+    return labels
+
+
 class PairedAntibodyDataset(Dataset):
     """Dataset for paired VH+VL antibody sequences in multi-module format.
 
@@ -108,6 +147,26 @@ class PairedAntibodyDataset(Dataset):
             "module_ids": encoding["module_ids"],
             "chain_type_ids": encoding["chain_type_ids"],
         }
+
+        # Build CDR region mask for both chains
+        has_cdrs = any(
+            record.get(f)
+            for f in list(PAIRED_CDR_FIELDS_HEAVY) + list(PAIRED_CDR_FIELDS_LIGHT)
+        )
+        if has_cdrs:
+            heavy_cdr_labels = _build_cdr_region_labels_chain(
+                record["sequence_heavy"], PAIRED_CDR_FIELDS_HEAVY, record,
+            )
+            light_cdr_labels = _build_cdr_region_labels_chain(
+                record["sequence_light"], PAIRED_CDR_FIELDS_LIGHT, record,
+            )
+            token_cdr_mask = self._map_chain_labels_to_tokens(
+                torch.tensor(heavy_cdr_labels, dtype=torch.float),
+                torch.tensor(light_cdr_labels, dtype=torch.float),
+                aa_to_token_map,
+                num_tokens,
+            )
+            result["cdr_mask"] = token_cdr_mask.long().tolist()
 
         # Attach paratope labels
         if (self.paratope_labels is not None

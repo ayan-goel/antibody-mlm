@@ -85,22 +85,38 @@ def _run_infilling(
 
 def _run_pll(
     model: torch.nn.Module, tokenizer, eval_dataset, device: str,
-    max_sequences: int, batch_size: int,
+    max_sequences: int, batch_size: int, is_paired: bool = False,
 ) -> dict:
     """Run PLL scoring."""
     logger.info("  [PLL] Running pseudo-log-likelihood scoring...")
     n_pll = min(max_sequences, len(eval_dataset))
-    sequences = []
-    special = set(tokenizer.all_special_tokens)
-    for i in range(n_pll):
-        sample = eval_dataset[i]
-        tokens = tokenizer.convert_ids_to_tokens(sample["input_ids"])
-        sequences.append("".join(t for t in tokens if t not in special))
 
-    pll_results = compute_pll_batch(
-        model=model, tokenizer=tokenizer, sequences=sequences,
-        device=device, batch_size=batch_size,
-    )
+    if is_paired:
+        # For paired models, pass pre-tokenized input to preserve the
+        # multi-module format ([CLS][MOD1][H]VH...[SEP][L]VL...[SEP]).
+        pll_results = []
+        for i in range(n_pll):
+            sample = eval_dataset[i]
+            ids = torch.tensor(sample["input_ids"], dtype=torch.long)
+            mask = torch.tensor(sample["attention_mask"], dtype=torch.long)
+            result = compute_pll(
+                model, tokenizer, device=device, batch_size=batch_size,
+                pre_tokenized_ids=ids, pre_tokenized_mask=mask,
+            )
+            pll_results.append(result)
+    else:
+        sequences = []
+        special = set(tokenizer.all_special_tokens)
+        for i in range(n_pll):
+            sample = eval_dataset[i]
+            tokens = tokenizer.convert_ids_to_tokens(sample["input_ids"])
+            sequences.append("".join(t for t in tokens if t not in special))
+
+        pll_results = compute_pll_batch(
+            model=model, tokenizer=tokenizer, sequences=sequences,
+            device=device, batch_size=batch_size,
+        )
+
     pll_values = [r["pll"] for r in pll_results]
     pll_norm = [r["pll_normalized"] for r in pll_results]
     return {
@@ -347,17 +363,25 @@ def run_experiment(
         ("pll", not args.skip_pll, lambda: _run_pll(
             model, tokenizer, eval_dataset, args.device,
             args.max_pll_sequences, args.pll_batch_size,
+            is_paired=config.data.paired,
         )),
         ("perplexity", not args.skip_perplexity, lambda: _run_perplexity(
             model, tokenizer, config, eval_dataset, args.device, args.batch_size,
         )),
-        ("infilling_quality", args.infilling_quality, lambda: _run_infilling_quality(
+        ("infilling_quality", not args.skip_infilling_quality, lambda: _run_infilling_quality(
             model, tokenizer, eval_dataset, args.device, args.max_infilling_quality_samples,
         )),
-        ("mutation_benchmark", not args.skip_mutations, lambda: _run_mutations(
+        ("mutation_benchmark", not args.skip_mutations and not config.data.paired,
+         lambda: _run_mutations(
             model, tokenizer, args.device, args.ab_bind_dir, args.pll_batch_size,
         )),
     ]
+
+    if config.data.paired and not args.skip_mutations:
+        logger.info(
+            "  [Mutations] Skipping AB-Bind mutation benchmark for paired model "
+            "(benchmark uses single-chain sequences only)"
+        )
 
     for section_name, should_run, run_fn in eval_sections:
         if not should_run:
@@ -432,7 +456,7 @@ def main() -> None:
     parser.add_argument("--skip-perplexity", action="store_true")
     parser.add_argument("--skip-mutations", action="store_true")
     parser.add_argument("--skip-downstream", action="store_true")
-    parser.add_argument("--infilling-quality", action="store_true")
+    parser.add_argument("--skip-infilling-quality", action="store_true")
 
     args = parser.parse_args()
 

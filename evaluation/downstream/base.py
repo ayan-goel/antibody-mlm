@@ -18,8 +18,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 
+from transformers import RoFormerConfig
+
 from evaluation.downstream.config import DownstreamConfig
-from evaluation.downstream.embedding_cache import CachedEmbeddingDataset, extract_and_cache
+from evaluation.downstream.embedding_cache import (
+    CachedEmbeddingDataset, cache_is_valid, extract_and_cache,
+)
 from evaluation.downstream.encoder import EncoderWrapper
 from evaluation.downstream.trainer import DownstreamTrainer
 from utils.seed import set_seed
@@ -92,6 +96,18 @@ class BaseDownstreamTask(ABC):
         )
 
         tokenizer = load_tokenizer(self.config.model_name)
+
+        checkpoint_config = RoFormerConfig.from_pretrained(self.config.checkpoint)
+        if checkpoint_config.vocab_size > len(tokenizer):
+            logger.warning(
+                "Paired model checkpoint (vocab_size=%d) evaluated with standard "
+                "tokenizer (vocab_size=%d) for downstream tasks. The encoder will "
+                "produce meaningful hidden states for standard tokens but won't see "
+                "paired framing tokens ([MOD1], [H], [L]). This is expected for "
+                "single-chain downstream benchmarks.",
+                checkpoint_config.vocab_size, len(tokenizer),
+            )
+
         trainer = DownstreamTrainer(self.config)
 
         output_dir = Path(self.config.output_dir) / f"{self.config.task}_{self.config.mode}"
@@ -107,23 +123,31 @@ class BaseDownstreamTask(ABC):
             val_cache = cache_dir / "val.pt"
             test_cache = cache_dir / "test.pt"
 
-            needs_caching = not (train_cache.exists() and val_cache.exists() and test_cache.exists())
+            ckpt = self.config.checkpoint
+            needs_caching = not (
+                cache_is_valid(train_cache, ckpt)
+                and cache_is_valid(val_cache, ckpt)
+                and cache_is_valid(test_cache, ckpt)
+            )
             if needs_caching:
                 encoder = EncoderWrapper.from_checkpoint(
                     self.config.checkpoint, device=self.config.device,
                 )
-                if not train_cache.exists():
+                if not cache_is_valid(train_cache, ckpt):
                     logger.info("Caching train embeddings...")
                     extract_and_cache(encoder, train_data, tokenizer, train_cache,
-                                      batch_size=self.config.batch_size, device=self.config.device)
-                if not val_cache.exists():
+                                      batch_size=self.config.batch_size, device=self.config.device,
+                                      checkpoint_path=ckpt)
+                if not cache_is_valid(val_cache, ckpt):
                     logger.info("Caching val embeddings...")
                     extract_and_cache(encoder, val_data, tokenizer, val_cache,
-                                      batch_size=self.config.batch_size, device=self.config.device)
-                if not test_cache.exists():
+                                      batch_size=self.config.batch_size, device=self.config.device,
+                                      checkpoint_path=ckpt)
+                if not cache_is_valid(test_cache, ckpt):
                     logger.info("Caching test embeddings...")
                     extract_and_cache(encoder, test_data, tokenizer, test_cache,
-                                      batch_size=self.config.batch_size, device=self.config.device)
+                                      batch_size=self.config.batch_size, device=self.config.device,
+                                      checkpoint_path=ckpt)
                 del encoder
                 torch.cuda.empty_cache()
                 logger.info("Encoder freed after caching embeddings")
@@ -210,7 +234,7 @@ class BaseDownstreamTask(ABC):
                 mask = batch["attention_mask"].to(self.config.device)
                 logits = DownstreamTrainer._forward_head(head, hidden, mask)
                 all_preds.append(logits.cpu())
-                all_labels.append(batch["labels"])
+                all_labels.append(batch["labels"].cpu())
         return self.compute_metrics(torch.cat(all_preds), torch.cat(all_labels))
 
     def _evaluate_finetune(

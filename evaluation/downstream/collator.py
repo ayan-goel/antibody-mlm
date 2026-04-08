@@ -38,7 +38,7 @@ class DownstreamCollator:
                 * self.pad_to_multiple_of
             )
 
-        token_level = labels_list[0].dim() >= 1
+        token_level = labels_list[0].dim() >= 1 and labels_list[0].size(0) > max_len // 2
 
         batch_ids, batch_mask, batch_labels = [], [], []
 

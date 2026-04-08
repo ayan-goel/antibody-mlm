@@ -36,9 +36,11 @@ def _get_max_seq_length(model: torch.nn.Module) -> int | None:
 def compute_pll(
     model: torch.nn.Module,
     tokenizer: PreTrainedTokenizerBase,
-    sequence: str,
+    sequence: str | None = None,
     device: str = "cuda",
     batch_size: int = 64,
+    pre_tokenized_ids: torch.Tensor | None = None,
+    pre_tokenized_mask: torch.Tensor | None = None,
 ) -> dict[str, float]:
     """Compute the exact pseudo-log-likelihood for a single sequence.
 
@@ -51,37 +53,52 @@ def compute_pll(
     Args:
         model: Trained masked LM.
         tokenizer: Matching tokenizer.
-        sequence: Raw amino acid string (e.g. "EVQLVES...").
+        sequence: Raw amino acid string (e.g. "EVQLVES..."). Ignored when
+            pre_tokenized_ids is provided.
         device: Torch device.
         batch_size: How many masked copies to process per forward pass.
+        pre_tokenized_ids: Optional pre-tokenized input IDs (1-D tensor).
+            Use this for paired sequences where the tokenization format
+            must be preserved (e.g. [CLS][MOD1][H]VH...[SEP][L]VL...[SEP]).
+        pre_tokenized_mask: Optional attention mask matching pre_tokenized_ids.
+            Defaults to all-ones if not provided.
 
     Returns:
         Dict with 'pll' (sum of log probs), 'pll_normalized' (pll / L),
         and 'was_truncated' (bool).
     """
-    sequence = sanitize_sequence(sequence)
-    if not sequence:
-        return {"pll": 0.0, "pll_normalized": 0.0, "was_truncated": False}
+    if pre_tokenized_ids is not None:
+        input_ids = pre_tokenized_ids
+        attention_mask = (
+            pre_tokenized_mask
+            if pre_tokenized_mask is not None
+            else torch.ones_like(input_ids)
+        )
+        was_truncated = False
+    else:
+        sequence = sanitize_sequence(sequence)
+        if not sequence:
+            return {"pll": 0.0, "pll_normalized": 0.0, "was_truncated": False}
 
-    max_model_len = _get_max_seq_length(model)
-    was_truncated = False
-    if max_model_len is not None:
-        max_aa = max_model_len - 2  # reserve for [CLS] and [SEP]
-        if len(sequence) > max_aa:
-            logger.debug(
-                "Truncating sequence from %d to %d AA (model max_position_embeddings=%d)",
-                len(sequence), max_aa, max_model_len,
-            )
-            sequence = sequence[:max_aa]
-            was_truncated = True
+        max_model_len = _get_max_seq_length(model)
+        was_truncated = False
+        if max_model_len is not None:
+            max_aa = max_model_len - 2  # reserve for [CLS] and [SEP]
+            if len(sequence) > max_aa:
+                logger.debug(
+                    "Truncating sequence from %d to %d AA (model max_position_embeddings=%d)",
+                    len(sequence), max_aa, max_model_len,
+                )
+                sequence = sequence[:max_aa]
+                was_truncated = True
 
-    spaced = " ".join(list(sequence))
-    encoding = tokenizer(
-        spaced, return_tensors="pt", padding=False,
-        truncation=True, max_length=max_model_len or 512,
-    )
-    input_ids = encoding["input_ids"].squeeze(0)
-    attention_mask = encoding["attention_mask"].squeeze(0)
+        spaced = " ".join(list(sequence))
+        encoding = tokenizer(
+            spaced, return_tensors="pt", padding=False,
+            truncation=True, max_length=max_model_len or 512,
+        )
+        input_ids = encoding["input_ids"].squeeze(0)
+        attention_mask = encoding["attention_mask"].squeeze(0)
 
     special_tokens = set(tokenizer.all_special_ids)
     mask_token_id = tokenizer.mask_token_id

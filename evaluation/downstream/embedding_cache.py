@@ -7,6 +7,7 @@ every epoch.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,27 @@ from masking.collator import MLMDataCollator
 logger = logging.getLogger(__name__)
 
 
+def _save_cache_meta(cache_path: Path, checkpoint_path: str) -> None:
+    """Write a sidecar metadata file alongside the embedding cache."""
+    meta_path = cache_path.with_suffix(cache_path.suffix + ".meta")
+    meta_path.write_text(json.dumps({"checkpoint_path": checkpoint_path}))
+
+
+def cache_is_valid(cache_path: str | Path, checkpoint_path: str) -> bool:
+    """Check if a cache file exists and was generated from the given checkpoint."""
+    cache_path = Path(cache_path)
+    if not cache_path.exists():
+        return False
+    meta_path = cache_path.with_suffix(cache_path.suffix + ".meta")
+    if not meta_path.exists():
+        return False  # legacy cache without meta — treat as invalid
+    try:
+        meta = json.loads(meta_path.read_text())
+        return meta.get("checkpoint_path", "") == checkpoint_path
+    except Exception:
+        return False
+
+
 def extract_and_cache(
     encoder: torch.nn.Module,
     dataset: Dataset,
@@ -31,6 +53,7 @@ def extract_and_cache(
     batch_size: int = 64,
     num_workers: int = 4,
     device: str = "cuda",
+    checkpoint_path: str = "",
 ) -> Path:
     """Extract per-token embeddings and save to disk.
 
@@ -42,6 +65,8 @@ def extract_and_cache(
         batch_size: Inference batch size.
         num_workers: DataLoader workers.
         device: Torch device.
+        checkpoint_path: Path to the checkpoint used for encoding.
+            Saved alongside the cache for invalidation on re-run.
 
     Returns:
         Path to the saved cache file.
@@ -88,6 +113,8 @@ def extract_and_cache(
         {"hidden_states": torch.cat(all_hidden, dim=0), "attention_mask": torch.cat(all_masks, dim=0)},
         cache_path,
     )
+    if checkpoint_path:
+        _save_cache_meta(cache_path, checkpoint_path)
     logger.info("Cached %d samples to %s", sum(m.size(0) for m in all_masks), cache_path)
     return cache_path
 
@@ -122,7 +149,7 @@ class CachedEmbeddingDataset(Dataset):
         aligned: list[torch.Tensor] = []
         for lab in labels:
             t = lab if isinstance(lab, torch.Tensor) else torch.tensor(lab)
-            is_token_level = t.dim() >= 1 and t.size(0) != seq_len and t.size(0) > seq_len // 2
+            is_token_level = t.dim() >= 1 and t.size(0) != seq_len and t.size(0) > seq_len // 4
             if is_token_level:
                 pad = seq_len - t.size(0)
                 if pad > 0:

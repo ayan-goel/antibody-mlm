@@ -193,6 +193,9 @@ class InfillingEvaluator(BaseEvaluator):
         self.model.eval()
         self.model.to(self.device)
 
+        # Seed random for reproducible scattered restoration
+        random.seed(42)
+
         n = min(max_samples, len(dataset))
         indices = list(range(n))
 

@@ -265,19 +265,19 @@ class DownstreamTrainer:
             "training_history": history,
         }
 
-    _head_needs_mask_cache: dict[int, bool] = {}
+    _head_needs_mask_cache: dict[type, bool] = {}
 
     @staticmethod
     def _forward_head(
         head: nn.Module, hidden: torch.Tensor, mask: torch.Tensor
     ) -> torch.Tensor:
         """Forward through head, passing attention_mask if the head accepts it."""
-        head_id = id(head)
-        if head_id not in DownstreamTrainer._head_needs_mask_cache:
+        head_type = type(head)
+        if head_type not in DownstreamTrainer._head_needs_mask_cache:
             import inspect
             sig = inspect.signature(head.forward)
-            DownstreamTrainer._head_needs_mask_cache[head_id] = "attention_mask" in sig.parameters
-        if DownstreamTrainer._head_needs_mask_cache[head_id]:
+            DownstreamTrainer._head_needs_mask_cache[head_type] = "attention_mask" in sig.parameters
+        if DownstreamTrainer._head_needs_mask_cache[head_type]:
             return head(hidden, mask)
         return head(hidden)
 
