@@ -124,9 +124,19 @@ class CachedEmbeddingDataset(Dataset):
 
     Each item returns a dict with 'hidden_states', 'attention_mask',
     and 'labels' (supplied at init).
+
+    When ``device`` is provided, the entire cache is moved to that device
+    at construction time, and labels are stacked into a single tensor.
+    Probe-mode training can then iterate via direct indexing without
+    paying CPU→GPU transfer cost on every batch.
     """
 
-    def __init__(self, cache_path: str | Path, labels: list[Any]) -> None:
+    def __init__(
+        self,
+        cache_path: str | Path,
+        labels: list[Any],
+        device: str = "cpu",
+    ) -> None:
         cache = torch.load(cache_path, weights_only=True)
         self.hidden_states: torch.Tensor = cache["hidden_states"]
         self.attention_mask: torch.Tensor = cache["attention_mask"]
@@ -137,6 +147,17 @@ class CachedEmbeddingDataset(Dataset):
             )
         seq_len = self.hidden_states.size(1)
         self.labels = self._align_labels(labels, seq_len)
+
+        # Stack labels into a single tensor (all per-dataset labels share shape).
+        self.labels_tensor: torch.Tensor = torch.stack(
+            [t if t.dim() > 0 else t.unsqueeze(0).squeeze(0) for t in self.labels]
+        ) if len(self.labels) > 0 else torch.empty(0)
+
+        self.device = device
+        if device != "cpu":
+            self.hidden_states = self.hidden_states.to(device)
+            self.attention_mask = self.attention_mask.to(device)
+            self.labels_tensor = self.labels_tensor.to(device)
 
     @staticmethod
     def _align_labels(labels: list[Any], seq_len: int) -> list[torch.Tensor]:
@@ -166,5 +187,5 @@ class CachedEmbeddingDataset(Dataset):
         return {
             "hidden_states": self.hidden_states[idx],
             "attention_mask": self.attention_mask[idx],
-            "labels": self.labels[idx],
+            "labels": self.labels_tensor[idx],
         }

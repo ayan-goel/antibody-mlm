@@ -72,21 +72,19 @@ class DownstreamTrainer:
         head.to(self.device)
         if isinstance(loss_fn, nn.Module):
             loss_fn = loss_fn.to(self.device)
-        train_loader = DataLoader(
-            train_data, batch_size=self.config.batch_size, shuffle=True,
-            num_workers=0,
-        )
-        val_loader = DataLoader(
-            val_data, batch_size=self.config.batch_size, shuffle=False,
-            num_workers=0,
-        )
+
+        # Probe data is GPU-resident: iterate via direct indexing instead of
+        # a DataLoader to avoid per-batch CPU→GPU transfer overhead.
+        n_train = len(train_data)
+        batch_size = self.config.batch_size
+        n_batches_per_epoch = (n_train + batch_size - 1) // batch_size
 
         optimizer = AdamW(
             head.parameters(),
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay,
         )
-        total_steps = len(train_loader) * self.config.epochs
+        total_steps = n_batches_per_epoch * self.config.epochs
         warmup_steps = int(total_steps * self.config.warmup_fraction)
         scheduler = LambdaLR(optimizer, _cosine_with_warmup(warmup_steps, total_steps))
 
@@ -100,10 +98,12 @@ class DownstreamTrainer:
             head.train()
             epoch_loss = 0.0
             n_batches = 0
-            for batch in train_loader:
-                hidden = batch["hidden_states"].to(self.device)
-                mask = batch["attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device)
+            perm = torch.randperm(n_train, device=self.device)
+            for i in range(0, n_train, batch_size):
+                idx = perm[i : i + batch_size]
+                hidden = train_data.hidden_states[idx]
+                mask = train_data.attention_mask[idx]
+                labels = train_data.labels_tensor[idx]
 
                 logits = self._forward_head(head, hidden, mask)
                 loss = loss_fn(logits, labels)
@@ -115,7 +115,7 @@ class DownstreamTrainer:
                 epoch_loss += loss.item()
                 n_batches += 1
 
-            val_metrics = self._evaluate(head, val_loader, loss_fn, compute_metrics)
+            val_metrics = self._evaluate(head, val_data, loss_fn, compute_metrics)
             val_metrics["train_loss"] = epoch_loss / max(n_batches, 1)
             history.append({"epoch": epoch, **val_metrics})
 
@@ -284,21 +284,23 @@ class DownstreamTrainer:
     def _evaluate(
         self,
         head: nn.Module,
-        loader: DataLoader,
+        data: Dataset,
         loss_fn: nn.Module,
         compute_metrics: Callable,
     ) -> dict[str, Any]:
-        """Evaluate head on cached-embedding data."""
+        """Evaluate head on cached-embedding data via direct GPU indexing."""
         head.eval()
         all_preds, all_labels = [], []
         total_loss = 0.0
         n_batches = 0
+        n = len(data)
+        batch_size = self.config.batch_size
 
         with torch.no_grad():
-            for batch in loader:
-                hidden = batch["hidden_states"].to(self.device)
-                mask = batch["attention_mask"].to(self.device)
-                labels = batch["labels"].to(self.device)
+            for i in range(0, n, batch_size):
+                hidden = data.hidden_states[i : i + batch_size]
+                mask = data.attention_mask[i : i + batch_size]
+                labels = data.labels_tensor[i : i + batch_size]
 
                 logits = self._forward_head(head, hidden, mask)
                 total_loss += loss_fn(logits, labels).item()

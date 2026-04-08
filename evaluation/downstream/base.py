@@ -152,9 +152,15 @@ class BaseDownstreamTask(ABC):
                 torch.cuda.empty_cache()
                 logger.info("Encoder freed after caching embeddings")
 
-            cached_train = CachedEmbeddingDataset(train_cache, train_labels)
-            cached_val = CachedEmbeddingDataset(val_cache, val_labels)
-            cached_test = CachedEmbeddingDataset(test_cache, test_labels)
+            cached_train = CachedEmbeddingDataset(
+                train_cache, train_labels, device=self.config.device,
+            )
+            cached_val = CachedEmbeddingDataset(
+                val_cache, val_labels, device=self.config.device,
+            )
+            cached_test = CachedEmbeddingDataset(
+                test_cache, test_labels, device=self.config.device,
+            )
             hidden_size = cached_train.hidden_states.size(-1)
         else:
             encoder = EncoderWrapper.from_checkpoint(
@@ -224,17 +230,18 @@ class BaseDownstreamTask(ABC):
         self, head: nn.Module, test_data: CachedEmbeddingDataset
     ) -> dict[str, float]:
         """Evaluate a trained head on cached test embeddings."""
-        from torch.utils.data import DataLoader
         head.eval()
-        loader = DataLoader(test_data, batch_size=self.config.batch_size, shuffle=False)
         all_preds, all_labels = [], []
+        n = len(test_data)
+        batch_size = self.config.batch_size
         with torch.no_grad():
-            for batch in loader:
-                hidden = batch["hidden_states"].to(self.config.device)
-                mask = batch["attention_mask"].to(self.config.device)
+            for i in range(0, n, batch_size):
+                hidden = test_data.hidden_states[i : i + batch_size]
+                mask = test_data.attention_mask[i : i + batch_size]
+                labels = test_data.labels_tensor[i : i + batch_size]
                 logits = DownstreamTrainer._forward_head(head, hidden, mask)
                 all_preds.append(logits.cpu())
-                all_labels.append(batch["labels"].cpu())
+                all_labels.append(labels.cpu())
         return self.compute_metrics(torch.cat(all_preds), torch.cat(all_labels))
 
     def _evaluate_finetune(
