@@ -125,47 +125,71 @@ class InfillingQualityAnalyzer:
             input_ids = torch.tensor(sample["input_ids"], dtype=torch.long)
             attention_mask = torch.tensor(sample["attention_mask"], dtype=torch.long)
             cdr_mask_t = torch.tensor(cdr_mask, dtype=torch.long)
+            chain_type_ids = sample.get("chain_type_ids")
+            chain_type_t = (
+                torch.tensor(chain_type_ids, dtype=torch.long)
+                if chain_type_ids is not None else None
+            )
 
             for region_id, region_name in CDR_NAMES.items():
-                positions = (cdr_mask_t == region_id).nonzero(as_tuple=True)[0].tolist()
-                if not positions:
+                region_positions = (cdr_mask_t == region_id).nonzero(as_tuple=True)[0].tolist()
+                if not region_positions:
                     continue
 
-                true_tokens = [input_ids[p].item() for p in positions]
-                true_aa_str = self._tokens_to_aa_string(true_tokens)
-                for aa in true_aa_str:
-                    true_aa_counts[region_name][aa] += 1
+                # Split heavy / light positions for paired samples so the
+                # `cdr*_jsd` metric is comparable to single-chain models
+                # (which only have heavy CDRs). chain_type_ids convention:
+                # 1 = heavy, 2 = light, 0 = special.
+                if chain_type_t is None:
+                    chain_buckets = [(region_name, region_positions)]
+                else:
+                    heavy = [p for p in region_positions if chain_type_t[p].item() == 1]
+                    light = [p for p in region_positions if chain_type_t[p].item() == 2]
+                    chain_buckets = [
+                        (region_name, heavy),
+                        (f"{region_name}_light", light),
+                    ]
 
-                predictions = self._predict_masked(input_ids, attention_mask, positions)
-                pred_tokens = [predictions[p].item() for p in positions]
-                pred_aa_str = self._tokens_to_aa_string(pred_tokens)
-                for aa in pred_aa_str:
-                    pred_aa_counts[region_name][aa] += 1
+                for bucket_name, positions in chain_buckets:
+                    if not positions:
+                        continue
+                    true_tokens = [input_ids[p].item() for p in positions]
+                    true_aa_str = self._tokens_to_aa_string(true_tokens)
+                    for aa in true_aa_str:
+                        true_aa_counts[bucket_name][aa] += 1
 
-                if region_id == 3:
-                    true_cdr3_lengths.append(len(true_aa_str))
-                    pred_cdr3_lengths.append(len(pred_aa_str))
+                    predictions = self._predict_masked(input_ids, attention_mask, positions)
+                    pred_tokens = [predictions[p].item() for p in positions]
+                    pred_aa_str = self._tokens_to_aa_string(pred_tokens)
+                    for aa in pred_aa_str:
+                        pred_aa_counts[bucket_name][aa] += 1
+
+                    if region_id == 3 and bucket_name == "cdr3":
+                        true_cdr3_lengths.append(len(true_aa_str))
+                        pred_cdr3_lengths.append(len(pred_aa_str))
 
         results: dict[str, Any] = {
             "num_samples": n,
             "num_samples_with_cdr": samples_with_cdr,
         }
 
-        for region_name in CDR_NAMES.values():
-            true_dist = _count_to_distribution(true_aa_counts[region_name], STANDARD_AAS)
-            pred_dist = _count_to_distribution(pred_aa_counts[region_name], STANDARD_AAS)
+        # Iterate over every bucket we accumulated, not just heavy CDR1/2/3.
+        # Paired samples populate `<region>_light` buckets in addition.
+        for bucket_name in sorted(true_aa_counts):
+            true_dist = _count_to_distribution(true_aa_counts[bucket_name], STANDARD_AAS)
+            pred_dist = _count_to_distribution(pred_aa_counts[bucket_name], STANDARD_AAS)
 
             jsd = _jensen_shannon_divergence(true_dist, pred_dist)
 
-            results[f"{region_name}_jsd"] = float(jsd)
-            results[f"{region_name}_true_aa_freq"] = {
+            results[f"{bucket_name}_jsd"] = float(jsd)
+            results[f"{bucket_name}_true_aa_freq"] = {
                 aa: float(f) for aa, f in zip(STANDARD_AAS, true_dist)
             }
-            results[f"{region_name}_pred_aa_freq"] = {
+            results[f"{bucket_name}_pred_aa_freq"] = {
                 aa: float(f) for aa, f in zip(STANDARD_AAS, pred_dist)
             }
-            results[f"{region_name}_true_total_residues"] = sum(true_aa_counts[region_name].values())
-            results[f"{region_name}_pred_total_residues"] = sum(pred_aa_counts[region_name].values())
+            results[f"{bucket_name}_true_total_residues"] = sum(true_aa_counts[bucket_name].values())
+            results[f"{bucket_name}_pred_total_residues"] = sum(pred_aa_counts[bucket_name].values())
 
         if true_cdr3_lengths:
             results["cdr3_length_true_mean"] = float(np.mean(true_cdr3_lengths))

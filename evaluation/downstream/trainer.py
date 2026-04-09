@@ -103,9 +103,10 @@ class DownstreamTrainer:
                 idx = perm[i : i + batch_size]
                 hidden = train_data.hidden_states[idx]
                 mask = train_data.attention_mask[idx]
+                special_mask = train_data.special_tokens_mask[idx]
                 labels = train_data.labels_tensor[idx]
 
-                logits = self._forward_head(head, hidden, mask)
+                logits = self._forward_head(head, hidden, mask, special_mask)
                 loss = loss_fn(logits, labels)
 
                 optimizer.zero_grad()
@@ -205,13 +206,17 @@ class DownstreamTrainer:
             epoch_loss = 0.0
             n_batches = 0
 
+            special_ids = torch.tensor(
+                list(tokenizer.all_special_ids), device=self.device,
+            )
             for batch in train_loader:
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device)
+                special_tokens_mask = torch.isin(input_ids, special_ids).long()
 
                 hidden = encoder(input_ids, attention_mask)
-                logits = self._forward_head(head, hidden, attention_mask)
+                logits = self._forward_head(head, hidden, attention_mask, special_tokens_mask)
                 loss = loss_fn(logits, labels)
 
                 optimizer.zero_grad()
@@ -226,7 +231,7 @@ class DownstreamTrainer:
                 n_batches += 1
 
             val_metrics = self._evaluate_finetune(
-                encoder, head, val_loader, loss_fn, compute_metrics,
+                encoder, head, val_loader, loss_fn, compute_metrics, tokenizer,
             )
             val_metrics["train_loss"] = epoch_loss / max(n_batches, 1)
             history.append({"epoch": epoch, **val_metrics})
@@ -265,19 +270,30 @@ class DownstreamTrainer:
             "training_history": history,
         }
 
-    _head_needs_mask_cache: dict[type, bool] = {}
+    _head_signature_cache: dict[type, tuple[bool, bool]] = {}
 
     @staticmethod
     def _forward_head(
-        head: nn.Module, hidden: torch.Tensor, mask: torch.Tensor
+        head: nn.Module,
+        hidden: torch.Tensor,
+        mask: torch.Tensor,
+        special_tokens_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward through head, passing attention_mask if the head accepts it."""
+        """Forward through head, passing attention_mask and (optionally)
+        special_tokens_mask if the head accepts them.
+        """
         head_type = type(head)
-        if head_type not in DownstreamTrainer._head_needs_mask_cache:
+        if head_type not in DownstreamTrainer._head_signature_cache:
             import inspect
-            sig = inspect.signature(head.forward)
-            DownstreamTrainer._head_needs_mask_cache[head_type] = "attention_mask" in sig.parameters
-        if DownstreamTrainer._head_needs_mask_cache[head_type]:
+            params = inspect.signature(head.forward).parameters
+            DownstreamTrainer._head_signature_cache[head_type] = (
+                "attention_mask" in params,
+                "special_tokens_mask" in params,
+            )
+        wants_mask, wants_special = DownstreamTrainer._head_signature_cache[head_type]
+        if wants_special:
+            return head(hidden, mask, special_tokens_mask=special_tokens_mask)
+        if wants_mask:
             return head(hidden, mask)
         return head(hidden)
 
@@ -300,9 +316,10 @@ class DownstreamTrainer:
             for i in range(0, n, batch_size):
                 hidden = data.hidden_states[i : i + batch_size]
                 mask = data.attention_mask[i : i + batch_size]
+                special_mask = data.special_tokens_mask[i : i + batch_size]
                 labels = data.labels_tensor[i : i + batch_size]
 
-                logits = self._forward_head(head, hidden, mask)
+                logits = self._forward_head(head, hidden, mask, special_mask)
                 total_loss += loss_fn(logits, labels).item()
                 n_batches += 1
                 all_preds.append(logits.cpu())
@@ -319,6 +336,7 @@ class DownstreamTrainer:
         loader: DataLoader,
         loss_fn: nn.Module,
         compute_metrics: Callable,
+        tokenizer: PreTrainedTokenizerBase,
     ) -> dict[str, Any]:
         """Evaluate encoder+head on raw data."""
         encoder.eval()
@@ -326,15 +344,19 @@ class DownstreamTrainer:
         all_preds, all_labels = [], []
         total_loss = 0.0
         n_batches = 0
+        special_ids = torch.tensor(
+            list(tokenizer.all_special_ids), device=self.device,
+        )
 
         with torch.no_grad():
             for batch in loader:
                 input_ids = batch["input_ids"].to(self.device)
                 attention_mask = batch["attention_mask"].to(self.device)
                 labels = batch["labels"].to(self.device)
+                special_tokens_mask = torch.isin(input_ids, special_ids).long()
 
                 hidden = encoder(input_ids, attention_mask)
-                logits = self._forward_head(head, hidden, attention_mask)
+                logits = self._forward_head(head, hidden, attention_mask, special_tokens_mask)
                 total_loss += loss_fn(logits, labels).item()
                 n_batches += 1
                 all_preds.append(logits.cpu())

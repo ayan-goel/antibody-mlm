@@ -75,6 +75,18 @@ def compute_pll(
             else torch.ones_like(input_ids)
         )
         was_truncated = False
+        # Symmetric safety with the string path: clip if longer than the
+        # model's positional window so the forward pass doesn't hit an
+        # out-of-bounds position embedding lookup.
+        max_model_len = _get_max_seq_length(model)
+        if max_model_len is not None and input_ids.size(0) > max_model_len:
+            logger.debug(
+                "Truncating pre-tokenized input from %d to %d (model max_position_embeddings=%d)",
+                input_ids.size(0), max_model_len, max_model_len,
+            )
+            input_ids = input_ids[:max_model_len]
+            attention_mask = attention_mask[:max_model_len]
+            was_truncated = True
     else:
         sequence = sanitize_sequence(sequence)
         if not sequence:

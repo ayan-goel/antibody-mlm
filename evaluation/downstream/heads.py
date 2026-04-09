@@ -29,11 +29,32 @@ class TokenClassificationHead(nn.Module):
         return self.classifier(self.dropout(hidden_states))
 
 
+def _mean_pool_excluding_specials(
+    hidden_states: torch.Tensor,
+    attention_mask: torch.Tensor,
+    special_tokens_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Mean-pool hidden states over real (non-special, non-pad) positions.
+
+    For paired models, the input contains framing tokens [MOD1]/[H]/[L]
+    that are real attended-to positions but carry no amino-acid identity.
+    Pooling over them biases the pooled vector and makes paired/single-chain
+    comparisons unfair. When ``special_tokens_mask`` is provided we
+    exclude any position where it equals 1 (special / pad).
+    """
+    pool_mask = attention_mask
+    if special_tokens_mask is not None:
+        pool_mask = attention_mask * (1 - special_tokens_mask)
+    mask = pool_mask.unsqueeze(-1).float()
+    return (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+
+
 class SequenceClassificationHead(nn.Module):
     """Sequence-level classification head with mean pooling.
 
     Input:  hidden_states (batch, seq_len, hidden_size),
-            attention_mask (batch, seq_len)
+            attention_mask (batch, seq_len),
+            special_tokens_mask (batch, seq_len) — optional, excluded from pool
     Output: (batch, num_labels)
     """
 
@@ -44,17 +65,15 @@ class SequenceClassificationHead(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(hidden_size, num_labels)
 
-    def _mean_pool(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        mask = attention_mask.unsqueeze(-1).float()
-        pooled = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        return pooled
-
     def forward(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        special_tokens_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        pooled = self._mean_pool(hidden_states, attention_mask)
+        pooled = _mean_pool_excluding_specials(
+            hidden_states, attention_mask, special_tokens_mask,
+        )
         return self.classifier(self.dropout(pooled))
 
 
@@ -62,7 +81,8 @@ class RegressionHead(nn.Module):
     """Sequence-level regression head with mean pooling.
 
     Input:  hidden_states (batch, seq_len, hidden_size),
-            attention_mask (batch, seq_len)
+            attention_mask (batch, seq_len),
+            special_tokens_mask (batch, seq_len) — optional, excluded from pool
     Output: (batch, num_targets)
     """
 
@@ -73,15 +93,13 @@ class RegressionHead(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.regressor = nn.Linear(hidden_size, num_targets)
 
-    def _mean_pool(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        mask = attention_mask.unsqueeze(-1).float()
-        pooled = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        return pooled
-
     def forward(
-        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        special_tokens_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        pooled = self._mean_pool(hidden_states, attention_mask)
+        pooled = _mean_pool_excluding_specials(
+            hidden_states, attention_mask, special_tokens_mask,
+        )
         return self.regressor(self.dropout(pooled))

@@ -22,6 +22,7 @@ from torch.utils.data import Dataset
 
 from data.benchmarks.binding import compute_class_weights, load_binding_splits
 from evaluation.downstream import register_task
+from evaluation.downstream._metric_utils import find_youdens_threshold
 from evaluation.downstream.base import BaseDownstreamTask
 from evaluation.downstream.heads import SequenceClassificationHead
 from utils.tokenizer import load_tokenizer_for_checkpoint
@@ -58,7 +59,11 @@ class BindingSpecificityTask(BaseDownstreamTask):
         auroc = float(roc_auc_score(labels_np, probs))
         auprc = float(average_precision_score(labels_np, probs))
 
-        binary_preds = (probs >= 0.5).astype(int)
+        # Use Youden's J threshold instead of fixed 0.5: the loss is
+        # class-weighted CE which pushes logits asymmetrically, so a fixed
+        # 0.5 threshold under-reports F1/MCC compared to a calibrated cut.
+        threshold = find_youdens_threshold(labels_np, probs)
+        binary_preds = (probs >= threshold).astype(int)
         f1 = float(f1_score(labels_np, binary_preds, average="macro", zero_division=0))
         mcc = float(matthews_corrcoef(labels_np, binary_preds))
 

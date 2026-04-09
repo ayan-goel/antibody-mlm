@@ -66,12 +66,25 @@ class MLMAccuracyEvaluator(BaseEvaluator):
             strategy=self.strategy,
             return_metadata=True,
         )
+
+        def _seed_worker(worker_id: int) -> None:
+            # Pin each worker's RNG to a deterministic seed so masking
+            # decisions are reproducible across reruns regardless of how
+            # PyTorch derives base worker seeds.
+            import random as _r
+            import numpy as _np
+            base = 42 + worker_id
+            torch.manual_seed(base)
+            _r.seed(base)
+            _np.random.seed(base)
+
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
             collate_fn=collator,
+            worker_init_fn=_seed_worker if num_workers > 0 else None,
         )
 
         self.model.eval()

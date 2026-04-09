@@ -91,7 +91,15 @@ class InfillingEvaluator(BaseEvaluator):
         return logits.argmax(dim=-1).cpu()
 
     def _eval_cdr_infilling(self, sample: dict) -> dict[str, list[float]]:
-        """Task A: mask each CDR entirely and predict."""
+        """Task A: mask each CDR entirely and predict.
+
+        For paired samples (which include both VH and VL CDR3 in the same
+        cdr_mask), the heavy-chain CDR3 is reported under
+        ``infill_cdr3_*`` so the metric is comparable to single-chain
+        models. Light-chain CDR3 metrics are reported separately under
+        ``infill_cdr3_light_*``. Single-chain samples (which lack
+        ``chain_type_ids``) are evaluated as before.
+        """
         input_ids = torch.tensor(sample["input_ids"], dtype=torch.long)
         attention_mask = torch.tensor(sample["attention_mask"], dtype=torch.long)
         cdr_mask = sample.get("cdr_mask")
@@ -99,13 +107,16 @@ class InfillingEvaluator(BaseEvaluator):
             return {}
 
         cdr_mask_t = torch.tensor(cdr_mask, dtype=torch.long)
+        chain_type_ids = sample.get("chain_type_ids")
+        chain_type_t = (
+            torch.tensor(chain_type_ids, dtype=torch.long)
+            if chain_type_ids is not None else None
+        )
         results: dict[str, list[float]] = defaultdict(list)
 
-        for region_id, region_name in CDR_NAMES.items():
-            positions = (cdr_mask_t == region_id).nonzero(as_tuple=True)[0].tolist()
+        def _record(name: str, positions: list[int]) -> None:
             if not positions:
-                continue
-
+                return
             true_tokens = [input_ids[p].item() for p in positions]
             predictions = self._predict_masked(input_ids, attention_mask, positions)
             pred_tokens = [predictions[p].item() for p in positions]
@@ -116,16 +127,37 @@ class InfillingEvaluator(BaseEvaluator):
             exact_match = 1.0 if correct == cdr_len else 0.0
             edit_dist = _levenshtein(true_tokens, pred_tokens)
 
-            results[f"infill_{region_name}_accuracy"].append(accuracy)
-            results[f"infill_{region_name}_exact_match"].append(exact_match)
-            results[f"infill_{region_name}_edit_distance"].append(edit_dist)
+            results[f"infill_{name}_accuracy"].append(accuracy)
+            results[f"infill_{name}_exact_match"].append(exact_match)
+            results[f"infill_{name}_edit_distance"].append(edit_dist)
 
-            if region_id == 3:
+            if name == "cdr3":
                 for bucket_name, (lo, hi) in CDR3_LENGTH_BUCKETS.items():
                     if lo <= cdr_len <= hi:
                         results[f"infill_cdr3_{bucket_name}_accuracy"].append(accuracy)
                         results[f"infill_cdr3_{bucket_name}_exact_match"].append(exact_match)
                         break
+
+        for region_id, region_name in CDR_NAMES.items():
+            region_positions = (cdr_mask_t == region_id).nonzero(as_tuple=True)[0].tolist()
+            if not region_positions:
+                continue
+
+            if chain_type_t is None:
+                # Single-chain dataset: all CDR positions belong to the heavy chain.
+                _record(region_name, region_positions)
+            else:
+                # Paired dataset: split by chain so heavy-chain metrics are
+                # apples-to-apples vs single-chain models. chain_type_ids
+                # convention: 1 = heavy, 2 = light, 0 = special.
+                heavy_positions = [
+                    p for p in region_positions if chain_type_t[p].item() == 1
+                ]
+                light_positions = [
+                    p for p in region_positions if chain_type_t[p].item() == 2
+                ]
+                _record(region_name, heavy_positions)
+                _record(f"{region_name}_light", light_positions)
 
         return results
 

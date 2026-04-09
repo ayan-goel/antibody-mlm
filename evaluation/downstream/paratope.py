@@ -18,12 +18,12 @@ from sklearn.metrics import (
     f1_score,
     matthews_corrcoef,
     roc_auc_score,
-    roc_curve,
 )
 from torch.utils.data import Dataset
 
 from data.benchmarks.paratope import compute_class_weight, load_paratope_splits
 from evaluation.downstream import register_task
+from evaluation.downstream._metric_utils import find_youdens_threshold
 from evaluation.downstream.base import BaseDownstreamTask
 from evaluation.downstream.heads import TokenClassificationHead
 from utils.tokenizer import load_tokenizer_for_checkpoint
@@ -53,14 +53,6 @@ class MaskedBCEWithLogitsLoss(nn.Module):
         return nn.functional.binary_cross_entropy_with_logits(
             logits_v, labels_v, pos_weight=pw,
         )
-
-
-def _find_youdens_threshold(labels: np.ndarray, probs: np.ndarray) -> float:
-    """Find optimal threshold via Youden's J statistic on ROC curve."""
-    fpr, tpr, thresholds = roc_curve(labels, probs)
-    j_scores = tpr - fpr
-    best_idx = int(np.argmax(j_scores))
-    return float(thresholds[best_idx])
 
 
 @register_task("paratope")
@@ -101,7 +93,7 @@ class ParatopePredictionTask(BaseDownstreamTask):
         auroc = float(roc_auc_score(labels_v, preds_v))
         auprc = float(average_precision_score(labels_v, preds_v))
 
-        threshold = _find_youdens_threshold(labels_v, preds_v)
+        threshold = find_youdens_threshold(labels_v, preds_v)
         binary_preds = (preds_v >= threshold).astype(int)
         f1 = float(f1_score(labels_v, binary_preds, zero_division=0))
         mcc = float(matthews_corrcoef(labels_v, binary_preds))

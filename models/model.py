@@ -17,21 +17,24 @@ from dataclasses import dataclass
 from transformers import RoFormerConfig, RoFormerForMaskedLM
 
 _SHARED_DEFAULTS = dict(
-    vocab_size=30,
+    vocab_size=28,  # AntiBERTa2 base tokenizer has exactly 28 tokens
     max_position_embeddings=256,
     hidden_dropout_prob=0.1,
     attention_probs_dropout_prob=0.1,
-    type_vocab_size=2,
+    type_vocab_size=1,  # token_type_ids never passed → no need for >1
     pad_token_id=0,
 )
 
 # Defaults for multispecific models with extended vocab and positions
 _MULTISPECIFIC_DEFAULTS = dict(
-    vocab_size=34,  # 30 base + 4 new special tokens ([MOD1], [MOD2], [H], [L])
+    vocab_size=32,  # 28 base + 4 added special tokens ([MOD1], [MOD2], [H], [L])
     max_position_embeddings=512,  # up from 256 for ~384-token paired sequences
     hidden_dropout_prob=0.1,
     attention_probs_dropout_prob=0.1,
-    type_vocab_size=3,  # 0=special, 1=heavy, 2=light (chain-type embeddings)
+    # chain_type_ids are returned by the dataset but never forwarded to the
+    # model as token_type_ids, so a >1 type vocab is dead capacity. Chain
+    # identity is encoded via the [H] / [L] framing tokens instead.
+    type_vocab_size=1,
     pad_token_id=0,
 )
 

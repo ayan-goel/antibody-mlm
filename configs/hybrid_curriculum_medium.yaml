@@ -31,18 +31,21 @@ masking:
       germline:
         mutated_weight: 6.0
     # 4-stage curriculum schedule with linear interpolation between breakpoints.
-    #   Stage 1 (0-5k): general antibody syntax — heavy uniform + span
-    #   Stage 2 (5k-15k): binding-site specialization — increase CDR + interface
-    #   Stage 3 (15k-25k): mutation realism — increase germline
-    #   Stage 4 (25k+): balanced final mixture
+    # Breakpoints scaled for max_steps=125000 so the curriculum is active
+    # across ~32% of training before freezing into the final stage, instead
+    # of only 20% with the original 25k tail.
+    #   Stage 1 (0-6.25k): general antibody syntax — heavy uniform + span
+    #   Stage 2 (6.25k-18.75k): binding-site specialization — increase CDR + interface
+    #   Stage 3 (18.75k-40k): mutation realism — increase germline
+    #   Stage 4 (40k+): balanced final mixture
     curriculum:
       - step: 0
         weights: [0.30, 0.15, 0.30, 0.10, 0.10, 0.05]
-      - step: 5000
+      - step: 6250
         weights: [0.10, 0.30, 0.10, 0.15, 0.25, 0.10]
-      - step: 15000
+      - step: 18750
         weights: [0.10, 0.20, 0.10, 0.15, 0.20, 0.25]
-      - step: 25000
+      - step: 40000
         weights: [0.10, 0.20, 0.10, 0.15, 0.20, 0.25]
 
 model:
@@ -55,12 +58,13 @@ training:
   batch_size: 32
   learning_rate: 5.0e-5
   num_epochs: 20
-  warmup_steps: 1000
+  max_steps: 125000  # equal-step comparison across strategies
+  warmup_steps: 6250  # 5% of 125k max_steps
   weight_decay: 0.01
   logging_steps: 100
   save_steps: 2000
-  eval_steps: 1000
+  eval_steps: 5000
   fp16: true
   dataloader_num_workers: 4
   gradient_accumulation_steps: 2
-  early_stopping_patience: 5
+  early_stopping_patience: 0  # disabled for fair equal-step comparison

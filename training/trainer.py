@@ -27,14 +27,24 @@ logger = logging.getLogger(__name__)
 
 
 def compute_mlm_metrics(eval_pred) -> dict[str, float]:
-    """Compute MLM accuracy from Trainer's EvalPrediction."""
-    logits, labels = eval_pred
-    predictions = logits.argmax(axis=-1)
+    """Compute MLM accuracy from Trainer's EvalPrediction.
+
+    With ``preprocess_logits_for_metrics`` set on the Trainer, the first
+    element of ``eval_pred`` is already an argmax (int tensor), not raw
+    logits — saves ~32× CPU RAM during eval.
+    """
+    predictions, labels = eval_pred
     mask = labels != -100
     correct = (predictions[mask] == labels[mask]).sum()
     total = mask.sum()
     accuracy = correct / total if total > 0 else 0.0
     return {"mlm_accuracy": float(accuracy)}
+
+
+def _argmax_for_metrics(logits, labels):
+    """preprocess_logits_for_metrics callback: drop the vocab dimension before
+    HF Trainer accumulates eval-batch tensors in CPU RAM."""
+    return logits.argmax(dim=-1)
 
 
 def train(config: ExperimentConfig) -> Path:
@@ -132,13 +142,25 @@ def train(config: ExperimentConfig) -> Path:
     output_dir = Path(config.training.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # If max_steps > 0, HF Trainer ignores num_train_epochs and stops at
+    # exactly max_steps optimizer updates. Use this for fair comparison.
+    use_max_steps = config.training.max_steps > 0
+    if use_max_steps:
+        logger.info(
+            "max_steps=%d set; training will stop at exactly %d optimizer steps "
+            "(num_epochs=%d ignored)",
+            config.training.max_steps, config.training.max_steps, config.training.num_epochs,
+        )
+
     training_args = TrainingArguments(
         output_dir=str(output_dir),
         num_train_epochs=config.training.num_epochs,
+        max_steps=config.training.max_steps if use_max_steps else -1,
         per_device_train_batch_size=config.training.batch_size,
         per_device_eval_batch_size=config.training.batch_size,
         learning_rate=config.training.learning_rate,
         warmup_steps=config.training.warmup_steps,
+        lr_scheduler_type="cosine",  # smooth decay vs HF default linear
         weight_decay=config.training.weight_decay,
         logging_steps=config.training.logging_steps,
         save_steps=config.training.save_steps,
@@ -148,10 +170,13 @@ def train(config: ExperimentConfig) -> Path:
         dataloader_num_workers=config.training.dataloader_num_workers,
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="mlm_accuracy",
-        greater_is_better=True,
+        # For equal-step comparison we report the FINAL checkpoint at exactly
+        # max_steps for every model. load_best_model_at_end would pick a
+        # different intermediate checkpoint per model based on a noisy eval
+        # metric, defeating the equal-compute fairness goal.
+        load_best_model_at_end=False,
         seed=config.seed,
+        data_seed=42,  # decouple dataloader RNG from per-model seed (Fix 4.3/4.4)
         report_to="none",
         remove_unused_columns=False,
     )
@@ -175,6 +200,7 @@ def train(config: ExperimentConfig) -> Path:
         eval_dataset=eval_dataset,
         data_collator=collator,
         compute_metrics=compute_mlm_metrics,
+        preprocess_logits_for_metrics=_argmax_for_metrics,
         callbacks=callbacks,
     )
 

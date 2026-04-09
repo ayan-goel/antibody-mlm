@@ -24,6 +24,13 @@ from masking.collator import MLMDataCollator
 logger = logging.getLogger(__name__)
 
 
+# Bumped from v1 (hidden_states + attention_mask only) to v2 when we
+# started saving special_tokens_mask so downstream pooling can exclude
+# framing tokens. Caches without `cache_version >= CACHE_VERSION` are
+# rejected and regenerated.
+CACHE_VERSION = 2
+
+
 def _save_cache_meta(
     cache_path: Path, checkpoint_path: str, tokenizer_type: str = "standard",
 ) -> None:
@@ -32,6 +39,7 @@ def _save_cache_meta(
     meta_path.write_text(json.dumps({
         "checkpoint_path": checkpoint_path,
         "tokenizer_type": tokenizer_type,
+        "cache_version": CACHE_VERSION,
     }))
 
 
@@ -40,9 +48,12 @@ def cache_is_valid(
 ) -> bool:
     """Check if a cache file exists and matches the given checkpoint + tokenizer.
 
-    A cache is considered invalid if the checkpoint path or the tokenizer
-    type (standard vs paired multispecific) differs from when it was
-    generated. Legacy caches without a sidecar meta file are also invalid.
+    A cache is considered invalid if any of the following are true:
+      - the cache file or its meta sidecar is missing
+      - the checkpoint path differs
+      - the tokenizer type (standard vs paired) differs
+      - ``cache_version`` is older than the current ``CACHE_VERSION``
+        (i.e. it lacks new fields like ``special_tokens_mask``)
     """
     cache_path = Path(cache_path)
     if not cache_path.exists():
@@ -54,8 +65,11 @@ def cache_is_valid(
         meta = json.loads(meta_path.read_text())
         if meta.get("checkpoint_path", "") != checkpoint_path:
             return False
-        # Missing tokenizer_type in legacy meta files → assume "standard"
-        return meta.get("tokenizer_type", "standard") == tokenizer_type
+        if meta.get("tokenizer_type", "standard") != tokenizer_type:
+            return False
+        if meta.get("cache_version", 1) < CACHE_VERSION:
+            return False
+        return True
     except Exception:
         return False
 
@@ -106,15 +120,25 @@ def extract_and_cache(
 
     all_hidden: list[torch.Tensor] = []
     all_masks: list[torch.Tensor] = []
+    all_specials: list[torch.Tensor] = []
 
     encoder.eval()
     with torch.no_grad():
         for batch in tqdm(loader, desc="Caching embeddings"):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            # The collator does not produce special_tokens_mask (it's only
+            # in each example dict). Re-derive from input_ids using the
+            # tokenizer's special-id set so we don't have to plumb the
+            # field through the collator.
+            special_ids_tensor = torch.tensor(
+                list(tokenizer.all_special_ids), device=input_ids.device,
+            )
+            special_mask = torch.isin(input_ids, special_ids_tensor).long()
             hidden_states = encoder(input_ids, attention_mask)
             all_hidden.append(hidden_states.cpu())
             all_masks.append(attention_mask.cpu())
+            all_specials.append(special_mask.cpu())
 
     global_max_len = max(h.size(1) for h in all_hidden)
     for i in range(len(all_hidden)):
@@ -122,11 +146,17 @@ def extract_and_cache(
         if pad > 0:
             all_hidden[i] = F.pad(all_hidden[i], (0, 0, 0, pad))
             all_masks[i] = F.pad(all_masks[i], (0, pad))
+            # Pad positions are "special" (they should never be pooled).
+            all_specials[i] = F.pad(all_specials[i], (0, pad), value=1)
 
     cache_path = Path(cache_path)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
-        {"hidden_states": torch.cat(all_hidden, dim=0), "attention_mask": torch.cat(all_masks, dim=0)},
+        {
+            "hidden_states": torch.cat(all_hidden, dim=0),
+            "attention_mask": torch.cat(all_masks, dim=0),
+            "special_tokens_mask": torch.cat(all_specials, dim=0),
+        },
         cache_path,
     )
     if checkpoint_path:
@@ -156,6 +186,13 @@ class CachedEmbeddingDataset(Dataset):
         cache = torch.load(cache_path, weights_only=True)
         self.hidden_states: torch.Tensor = cache["hidden_states"]
         self.attention_mask: torch.Tensor = cache["attention_mask"]
+        # cache_version >= 2 includes special_tokens_mask. Older caches
+        # won't reach this code path because cache_is_valid rejects them.
+        if "special_tokens_mask" in cache:
+            self.special_tokens_mask: torch.Tensor = cache["special_tokens_mask"]
+        else:
+            # Defensive fallback (shouldn't happen given cache_is_valid checks).
+            self.special_tokens_mask = torch.zeros_like(self.attention_mask)
         if len(labels) != self.hidden_states.size(0):
             raise ValueError(
                 f"Label count ({len(labels)}) != cached sample count "
@@ -173,6 +210,7 @@ class CachedEmbeddingDataset(Dataset):
         if device != "cpu":
             self.hidden_states = self.hidden_states.to(device)
             self.attention_mask = self.attention_mask.to(device)
+            self.special_tokens_mask = self.special_tokens_mask.to(device)
             self.labels_tensor = self.labels_tensor.to(device)
 
     @staticmethod
@@ -203,5 +241,6 @@ class CachedEmbeddingDataset(Dataset):
         return {
             "hidden_states": self.hidden_states[idx],
             "attention_mask": self.attention_mask[idx],
+            "special_tokens_mask": self.special_tokens_mask[idx],
             "labels": self.labels_tensor[idx],
         }

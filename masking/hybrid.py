@@ -103,7 +103,12 @@ class HybridMasking(BaseMaskingStrategy):
         self._strategy_names: list[str] = list(sub_strategies)
         self._base_weights = torch.tensor(policy_weights, dtype=torch.float)
         self._base_weights = self._base_weights / self._base_weights.sum()
-        self._current_weights = self._base_weights.clone()
+        # IMPORTANT: _current_weights is in shared memory so DataLoader worker
+        # processes (which inherit a copy of this strategy at fork time) see
+        # curriculum updates from HybridMaskingCallback.set_step() which runs
+        # in the main process. Without share_memory_, the curriculum is a
+        # silent no-op whenever dataloader_num_workers > 0.
+        self._current_weights = self._base_weights.clone().share_memory_()
 
         # Parse curriculum schedule
         self._curriculum: list[tuple[int, torch.Tensor]] | None = None
@@ -159,6 +164,10 @@ class HybridMasking(BaseMaskingStrategy):
         """Update mixture weights based on curriculum schedule.
 
         Called by HybridMaskingCallback.on_step_begin(). No-op in static mode.
+
+        IMPORTANT: writes are in-place via copy_() so the underlying shared
+        memory is mutated. Reassigning self._current_weights would create a
+        new tensor that's NOT shared with the forked DataLoader workers.
         """
         self._current_step = step
         if self._curriculum is None:
@@ -166,25 +175,26 @@ class HybridMasking(BaseMaskingStrategy):
 
         schedule = self._curriculum
 
-        # Before first breakpoint
+        # Compute the new weights for this step
         if step <= schedule[0][0]:
-            self._current_weights = schedule[0][1].clone()
-            return
-
-        # After last breakpoint
-        if step >= schedule[-1][0]:
-            self._current_weights = schedule[-1][1].clone()
-            return
-
-        # Linear interpolation between bracketing breakpoints
-        for i in range(len(schedule) - 1):
-            s0, w0 = schedule[i]
-            s1, w1 = schedule[i + 1]
-            if s0 <= step < s1:
-                alpha = (step - s0) / (s1 - s0)
-                self._current_weights = (1 - alpha) * w0 + alpha * w1
-                self._current_weights = self._current_weights / self._current_weights.sum()
+            new_weights = schedule[0][1]
+        elif step >= schedule[-1][0]:
+            new_weights = schedule[-1][1]
+        else:
+            new_weights = None
+            for i in range(len(schedule) - 1):
+                s0, w0 = schedule[i]
+                s1, w1 = schedule[i + 1]
+                if s0 <= step < s1:
+                    alpha = (step - s0) / (s1 - s0)
+                    new_weights = (1 - alpha) * w0 + alpha * w1
+                    new_weights = new_weights / new_weights.sum()
+                    break
+            if new_weights is None:
                 return
+
+        # In-place write to the shared-memory tensor.
+        self._current_weights.copy_(new_weights)
 
     def select_mask_positions(
         self,

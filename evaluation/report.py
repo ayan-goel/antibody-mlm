@@ -37,9 +37,14 @@ _ZEROSHOT_METRICS = [
 ]
 
 _MUTATION_METRICS = [
-    ("overall_spearman_rho", "Mut. Spearman"),
-    ("overall_pearson_r", "Mut. Pearson"),
-    ("binary_auroc", "Mut. AUROC"),
+    # Primary: per-complex aggregations.
+    # Mean spearman across complexes is the honest measure of within-complex
+    # ranking ability; the pooled spearman is dominated by between-complex
+    # variance (Simpson's paradox) and overstates model performance.
+    ("mean_per_complex_spearman_rho", "Mut. Spearman (per-cplx)"),
+    ("mean_per_complex_auroc", "Mut. AUROC (per-cplx)"),
+    ("pooled_spearman_rho", "Mut. Spearman (pooled)"),
+    ("pooled_binary_auroc", "Mut. AUROC (pooled)"),
 ]
 
 _DOWNSTREAM_METRICS = [

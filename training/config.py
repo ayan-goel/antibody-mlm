@@ -54,6 +54,10 @@ class TrainingConfig:
     batch_size: int = 32
     learning_rate: float = 1e-4
     num_epochs: int = 3
+    # When > 0, training stops at exactly this many optimizer steps and
+    # ``num_epochs`` is ignored. Use this for fair cross-strategy comparison
+    # so every model sees the same amount of compute.
+    max_steps: int = 0
     warmup_steps: int = 100
     weight_decay: float = 0.01
     logging_steps: int = 50

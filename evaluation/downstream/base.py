@@ -234,8 +234,9 @@ class BaseDownstreamTask(ABC):
             for i in range(0, n, batch_size):
                 hidden = test_data.hidden_states[i : i + batch_size]
                 mask = test_data.attention_mask[i : i + batch_size]
+                special_mask = test_data.special_tokens_mask[i : i + batch_size]
                 labels = test_data.labels_tensor[i : i + batch_size]
-                logits = DownstreamTrainer._forward_head(head, hidden, mask)
+                logits = DownstreamTrainer._forward_head(head, hidden, mask, special_mask)
                 all_preds.append(logits.cpu())
                 all_labels.append(labels.cpu())
         return self.compute_metrics(torch.cat(all_preds), torch.cat(all_labels))
@@ -259,13 +260,17 @@ class BaseDownstreamTask(ABC):
         encoder.eval()
         head.eval()
         all_preds, all_labels = [], []
+        special_ids = torch.tensor(
+            list(tokenizer.all_special_ids), device=self.config.device,
+        )
         with torch.no_grad():
             for batch in loader:
                 input_ids = batch["input_ids"].to(self.config.device)
                 attention_mask = batch["attention_mask"].to(self.config.device)
                 labels = batch["labels"].to(self.config.device)
+                special_tokens_mask = torch.isin(input_ids, special_ids).long()
                 hidden = encoder(input_ids, attention_mask)
-                logits = DownstreamTrainer._forward_head(head, hidden, attention_mask)
+                logits = DownstreamTrainer._forward_head(head, hidden, attention_mask, special_tokens_mask)
                 all_preds.append(logits.cpu())
                 all_labels.append(labels.cpu())
         return self.compute_metrics(torch.cat(all_preds), torch.cat(all_labels))
@@ -274,12 +279,17 @@ class BaseDownstreamTask(ABC):
     def _aggregate_seeds(
         seed_metrics: list[dict[str, float]],
     ) -> dict[str, Any]:
-        """Compute mean and std across seeds for each metric."""
+        """Compute mean and sample std across seeds for each metric.
+
+        Uses ``ddof=1`` (sample std) which is the unbiased estimator and
+        what most papers report. With N=3 seeds the default ``ddof=0``
+        underreports the std by ~22%.
+        """
         all_keys = {k for m in seed_metrics for k in m if isinstance(m[k], (int, float))}
         result: dict[str, Any] = {"per_seed": seed_metrics}
         for key in sorted(all_keys):
             values = [m[key] for m in seed_metrics if key in m]
             if values:
                 result[f"{key}_mean"] = float(np.mean(values))
-                result[f"{key}_std"] = float(np.std(values))
+                result[f"{key}_std"] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
         return result

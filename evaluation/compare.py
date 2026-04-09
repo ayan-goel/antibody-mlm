@@ -104,6 +104,50 @@ def discover_experiments(
     return experiments
 
 
+def _backfill_per_complex_mutation_metrics(mut: dict[str, Any]) -> None:
+    """Compute per-complex aggregations from a legacy mutation_benchmark dict.
+
+    Older runs only stored ``per_complex[pdb_id]['spearman_rho']`` plus
+    pooled metrics. The pooled spearman is misleading (Simpson's paradox);
+    this helper computes mean/median per-complex aggregations from the
+    saved per-complex data so we can show the honest metric without
+    re-running the benchmark.
+    """
+    import math
+    from statistics import mean, median
+
+    if "mean_per_complex_spearman_rho" in mut:
+        return  # already populated by a fresh run
+
+    per_complex = mut.get("per_complex")
+    if not isinstance(per_complex, dict):
+        return
+
+    spearmans = []
+    for entry in per_complex.values():
+        if not isinstance(entry, dict):
+            continue
+        rho = entry.get("spearman_rho")
+        if rho is None:
+            continue
+        if isinstance(rho, float) and math.isnan(rho):
+            continue
+        spearmans.append(float(rho))
+
+    if spearmans:
+        mut["mean_per_complex_spearman_rho"] = float(mean(spearmans))
+        mut["median_per_complex_spearman_rho"] = float(median(spearmans))
+        mut["n_complexes_with_spearman"] = len(spearmans)
+
+    # Carry pooled values to their new key names if not already there.
+    if "pooled_spearman_rho" not in mut and "overall_spearman_rho" in mut:
+        mut["pooled_spearman_rho"] = mut["overall_spearman_rho"]
+    if "pooled_pearson_r" not in mut and "overall_pearson_r" in mut:
+        mut["pooled_pearson_r"] = mut["overall_pearson_r"]
+    if "pooled_binary_auroc" not in mut and "binary_auroc" in mut:
+        mut["pooled_binary_auroc"] = mut["binary_auroc"]
+
+
 def _unpack_all_metrics(
     exp: ExperimentResult, all_metrics: dict[str, Any],
 ) -> None:
@@ -141,6 +185,9 @@ def _unpack_all_metrics(
         if exp.mutation_metrics is None:
             exp.mutation_metrics = {}
         exp.mutation_metrics.update(mut)
+        # Backfill per-complex aggregations for legacy results files that
+        # only stored the per_complex dict and the (misleading) pooled keys.
+        _backfill_per_complex_mutation_metrics(exp.mutation_metrics)
 
     downstream = all_metrics.get("downstream")
     if isinstance(downstream, dict) and "error" not in downstream:
@@ -218,7 +265,13 @@ _ZEROSHOT_KEYS = [
 ]
 
 _MUTATION_KEYS = [
-    "overall_spearman_rho", "overall_pearson_r", "binary_auroc",
+    # Primary: per-complex aggregations (Simpson's paradox–free)
+    "mean_per_complex_spearman_rho",
+    "median_per_complex_spearman_rho",
+    "mean_per_complex_auroc",
+    # Secondary: pooled (kept for backward compat / sanity checks)
+    "pooled_spearman_rho",
+    "pooled_binary_auroc",
 ]
 
 _DOWNSTREAM_METRIC_KEYS = {

@@ -25,6 +25,9 @@ def _make_tokenizer(vocab_size: int = 34, mask_token_id: int = 4) -> MagicMock:
     tok.vocab_size = vocab_size
     tok.mask_token_id = mask_token_id
     tok.pad_token_id = 0
+    tok.unk_token_id = 1
+    _aa_to_id = {aa: 5 + i for i, aa in enumerate("ACDEFGHIKLMNPQRSTVWY")}
+    tok.convert_tokens_to_ids.side_effect = lambda c: _aa_to_id.get(c, 1)
     return tok
 
 

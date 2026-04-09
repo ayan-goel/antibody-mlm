@@ -15,6 +15,9 @@ import torch
 from transformers import PreTrainedTokenizerBase
 
 
+_CANONICAL_AAS = "ACDEFGHIKLMNPQRSTVWY"
+
+
 class BaseMaskingStrategy(ABC):
     """Abstract base class for all masking strategies.
 
@@ -35,6 +38,16 @@ class BaseMaskingStrategy(ABC):
         self.mask_token_ratio = mask_token_ratio
         self.random_token_ratio = random_token_ratio
         self.keep_ratio = 1.0 - mask_token_ratio - random_token_ratio
+        # Precomputed canonical-AA token IDs for random-token replacement.
+        # The previous implementation sampled `randint(low=5, high=vocab_size)`
+        # which can pick non-standard tokens like X/B/Z, replacing
+        # ~0.065% of tokens with garbage.
+        aa_ids = [tokenizer.convert_tokens_to_ids(aa) for aa in _CANONICAL_AAS]
+        unk = tokenizer.unk_token_id
+        self._aa_ids = torch.tensor(
+            [tid for tid in aa_ids if tid is not None and tid != unk],
+            dtype=torch.long,
+        )
 
     @abstractmethod
     def select_mask_positions(
@@ -96,12 +109,13 @@ class BaseMaskingStrategy(ABC):
         mask_indices = mask_positions.nonzero(as_tuple=True)[0]
 
         masked_input_ids[mask_indices[replace_with_mask]] = self.tokenizer.mask_token_id
-        random_tokens = torch.randint(
-            low=5,
-            high=self.tokenizer.vocab_size,
-            size=(replace_with_random.sum().item(),),
-        )
-        masked_input_ids[mask_indices[replace_with_random]] = random_tokens
+        n_random = int(replace_with_random.sum().item())
+        if n_random > 0:
+            sampled = torch.randint(
+                low=0, high=self._aa_ids.numel(), size=(n_random,),
+            )
+            random_tokens = self._aa_ids[sampled]
+            masked_input_ids[mask_indices[replace_with_random]] = random_tokens
 
         return masked_input_ids, labels
 

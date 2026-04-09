@@ -32,11 +32,18 @@ from evaluation.downstream import DownstreamConfig, get_task, load_downstream_co
 from evaluation.infilling import InfillingEvaluator
 from evaluation.infilling_quality import InfillingQualityAnalyzer
 from evaluation.mlm_accuracy import MLMAccuracyEvaluator
-from evaluation.pseudo_loglikelihood import compute_pll, compute_pll_batch
+from evaluation.pseudo_loglikelihood import compute_pll
 from masking import get_strategy
 from training.config import load_config
 from utils.seed import set_seed
 from utils.tokenizer import load_tokenizer, load_tokenizer_multispecific
+
+# Held-out split seed: every model uses the SAME generator seed for the
+# train/eval random_split, regardless of its training-time `config.seed`.
+# This guarantees the eval set is identical across models so cross-model
+# metric comparisons are well-defined. Don't change without re-running
+# every experiment.
+EVAL_SPLIT_SEED = 42
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,20 +60,27 @@ def _load_experiments_yaml(path: str | Path) -> dict:
 def _run_mlm_eval(
     model: torch.nn.Module,
     tokenizer,
-    config,
     eval_dataset,
     device: str,
     batch_size: int,
 ) -> dict:
-    """Run MLM accuracy and region-stratified evaluation."""
-    logger.info("  [MLM] Running MLM accuracy evaluation...")
+    """Run MLM accuracy and region-stratified evaluation.
+
+    Always uses uniform masking as the *reference* strategy regardless of
+    which strategy this model was trained with. Comparing each model's
+    eval accuracy under its own training-time masking is unfair: span /
+    cdr / germline / interface all skew toward harder positions, making
+    those models look worse than uniform-trained models even when their
+    representations are equally good.
+    """
+    logger.info("  [MLM] Running MLM accuracy evaluation (uniform reference masking)...")
+    set_seed(42)  # ensure mask draws are deterministic across reruns
     strategy = get_strategy(
-        config.masking.strategy,
+        "uniform",
         tokenizer=tokenizer,
-        mask_prob=config.masking.mask_prob,
-        mask_token_ratio=config.masking.mask_token_ratio,
-        random_token_ratio=config.masking.random_token_ratio,
-        **config.masking.params,
+        mask_prob=0.15,
+        mask_token_ratio=0.8,
+        random_token_ratio=0.1,
     )
     evaluator = MLMAccuracyEvaluator(
         model=model, tokenizer=tokenizer, strategy=strategy, device=device,
@@ -79,43 +93,37 @@ def _run_infilling(
 ) -> dict:
     """Run CDR infilling evaluation."""
     logger.info("  [Infilling] Running infilling evaluation...")
+    set_seed(42)
     evaluator = InfillingEvaluator(model=model, tokenizer=tokenizer, device=device)
     return evaluator.evaluate(dataset=eval_dataset, max_samples=max_samples)
 
 
 def _run_pll(
     model: torch.nn.Module, tokenizer, eval_dataset, device: str,
-    max_sequences: int, batch_size: int, is_paired: bool = False,
+    max_sequences: int, batch_size: int,
 ) -> dict:
-    """Run PLL scoring."""
+    """Run PLL scoring on the held-out set.
+
+    Always uses the pre-tokenized path so that single-chain and paired
+    models are scored on the exact same tokens the dataset produced.
+    The previous single-chain path round-tripped through a string and
+    called ``sanitize_sequence``, which silently dropped non-standard
+    amino acids — making single-chain and paired PLL means incomparable.
+    """
     logger.info("  [PLL] Running pseudo-log-likelihood scoring...")
+    set_seed(42)
     n_pll = min(max_sequences, len(eval_dataset))
 
-    if is_paired:
-        # For paired models, pass pre-tokenized input to preserve the
-        # multi-module format ([CLS][MOD1][H]VH...[SEP][L]VL...[SEP]).
-        pll_results = []
-        for i in range(n_pll):
-            sample = eval_dataset[i]
-            ids = torch.tensor(sample["input_ids"], dtype=torch.long)
-            mask = torch.tensor(sample["attention_mask"], dtype=torch.long)
-            result = compute_pll(
-                model, tokenizer, device=device, batch_size=batch_size,
-                pre_tokenized_ids=ids, pre_tokenized_mask=mask,
-            )
-            pll_results.append(result)
-    else:
-        sequences = []
-        special = set(tokenizer.all_special_tokens)
-        for i in range(n_pll):
-            sample = eval_dataset[i]
-            tokens = tokenizer.convert_ids_to_tokens(sample["input_ids"])
-            sequences.append("".join(t for t in tokens if t not in special))
-
-        pll_results = compute_pll_batch(
-            model=model, tokenizer=tokenizer, sequences=sequences,
-            device=device, batch_size=batch_size,
+    pll_results = []
+    for i in range(n_pll):
+        sample = eval_dataset[i]
+        ids = torch.tensor(sample["input_ids"], dtype=torch.long)
+        mask = torch.tensor(sample["attention_mask"], dtype=torch.long)
+        result = compute_pll(
+            model, tokenizer, device=device, batch_size=batch_size,
+            pre_tokenized_ids=ids, pre_tokenized_mask=mask,
         )
+        pll_results.append(result)
 
     pll_values = [r["pll"] for r in pll_results]
     pll_norm = [r["pll_normalized"] for r in pll_results]
@@ -127,17 +135,21 @@ def _run_pll(
 
 
 def _run_perplexity(
-    model: torch.nn.Module, tokenizer, config, eval_dataset, device: str, batch_size: int,
+    model: torch.nn.Module, tokenizer, eval_dataset, device: str, batch_size: int,
 ) -> dict:
-    """Run region-stratified perplexity."""
-    logger.info("  [Perplexity] Running region-stratified perplexity...")
+    """Run region-stratified perplexity using a uniform reference masking.
+
+    See `_run_mlm_eval` for the rationale: cross-model perplexity is only
+    meaningful when every model is masked under the same distribution.
+    """
+    logger.info("  [Perplexity] Running region-stratified perplexity (uniform reference masking)...")
+    set_seed(42)
     strategy = get_strategy(
-        config.masking.strategy,
+        "uniform",
         tokenizer=tokenizer,
-        mask_prob=config.masking.mask_prob,
-        mask_token_ratio=config.masking.mask_token_ratio,
-        random_token_ratio=config.masking.random_token_ratio,
-        **config.masking.params,
+        mask_prob=0.15,
+        mask_token_ratio=0.8,
+        random_token_ratio=0.1,
     )
     evaluator = MLMAccuracyEvaluator(
         model=model, tokenizer=tokenizer, strategy=strategy, device=device,
@@ -151,15 +163,105 @@ def _run_infilling_quality(
 ) -> dict:
     """Run infilling quality analysis."""
     logger.info("  [InfillingQuality] Running AA frequency analysis...")
+    set_seed(42)
     analyzer = InfillingQualityAnalyzer(model=model, tokenizer=tokenizer, device=device)
     return analyzer.analyze(dataset=eval_dataset, max_samples=max_samples)
+
+
+def _wildtype_marginal_score(
+    model: torch.nn.Module,
+    tokenizer,
+    wt_seq: str,
+    mut_seq: str,
+    device: str,
+    max_aa: int,
+) -> float | None:
+    """Score a mutation via the ESM wildtype-marginal recipe.
+
+    Mask the mutation positions in the WILDTYPE sequence in a single
+    forward pass and compute the model's "destabilization score":
+
+      Σ_i [log p(wt_aa[i] | wt_ctx_masked) − log p(mut_aa[i] | wt_ctx_masked)]
+
+    Sign convention: HIGHER score = model thinks the mutation is more
+    destabilizing (i.e. wildtype is more likely than the mutant). With
+    AB-Bind's convention (ΔΔG > 0 = destabilizing) we therefore expect
+    a POSITIVE spearman correlation between score and ΔΔG when the
+    model is well calibrated.
+
+    This is the standard mutation-effect metric for masked LMs (Meier et al.,
+    NeurIPS 2021) and is much less noisy than the full-PLL difference for
+    multi-point mutations because it isolates the per-position log-likelihood
+    ratio at the actual mutation sites.
+
+    Returns ``None`` if every mutation position lies past the truncation
+    boundary (mutation effectively erased by length truncation).
+    """
+    if len(wt_seq) != len(mut_seq):
+        return None  # indels not supported
+
+    # Find mutation positions. Reject the WHOLE record if ANY mutation site
+    # falls past the truncation window — partially-scored multi-point
+    # mutations would silently inject biased scores into the per-complex
+    # rank (a 3-mutation record reduced to 2 sites is on a different scale
+    # than a fully-scored 3-mutation record).
+    positions = [i for i in range(len(wt_seq)) if wt_seq[i] != mut_seq[i]]
+    if not positions:
+        return None
+    if any(p >= max_aa for p in positions):
+        return None
+
+    wt_seq_t = wt_seq[:max_aa]
+    spaced = " ".join(list(wt_seq_t))
+    enc = tokenizer(
+        spaced, return_tensors="pt", padding=False,
+        truncation=True, max_length=max_aa + 2,
+    )
+    input_ids = enc["input_ids"].squeeze(0)
+    attention_mask = enc["attention_mask"].squeeze(0)
+
+    # Defensive: this function only supports the standard single-chain
+    # tokenization where [CLS] sits at index 0, so AA position p maps to
+    # token index p+1. Paired tokenizers prepend extra [MOD1]/[H] tokens
+    # which would invalidate the offset.
+    if input_ids[0].item() != tokenizer.cls_token_id:
+        return None  # unexpected tokenization layout — skip this record
+
+    # AA positions start at token index 1 (after [CLS])
+    masked_ids = input_ids.clone()
+    for p in positions:
+        masked_ids[p + 1] = tokenizer.mask_token_id
+
+    masked_ids = masked_ids.unsqueeze(0).to(device)
+    attention_mask = attention_mask.unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        logits = model(input_ids=masked_ids, attention_mask=attention_mask).logits
+    log_probs = torch.log_softmax(logits[0], dim=-1)
+
+    score = 0.0
+    for p in positions:
+        wt_id = tokenizer.convert_tokens_to_ids(wt_seq_t[p])
+        mut_id = tokenizer.convert_tokens_to_ids(mut_seq[p])
+        if wt_id == tokenizer.unk_token_id or mut_id == tokenizer.unk_token_id:
+            continue
+        # log p(wt) - log p(mut): high when model strongly prefers wildtype.
+        score += float(log_probs[p + 1, wt_id].item() - log_probs[p + 1, mut_id].item())
+    return score
 
 
 def _run_mutations(
     model: torch.nn.Module, tokenizer, device: str, data_dir: str, batch_size: int,
 ) -> dict:
-    """Run zero-shot mutation benchmarking with AB-Bind."""
-    logger.info("  [Mutations] Running AB-Bind mutation benchmark...")
+    """Run zero-shot mutation benchmarking with AB-Bind.
+
+    Uses wildtype-marginal scoring (one forward pass per record, scores
+    only the mutation positions). This is the standard ESM-style recipe
+    and is dramatically faster + lower-noise than the previous full-PLL
+    difference approach, especially for multi-point mutations where
+    full-PLL accumulates O(K²) noise from non-mutated positions.
+    """
+    logger.info("  [Mutations] Running AB-Bind mutation benchmark (wildtype-marginal)...")
     from data.benchmarks.ab_bind import download_ab_bind, load_ab_bind
     from scipy.stats import pearsonr, spearmanr
     from sklearn.metrics import roc_auc_score
@@ -178,28 +280,27 @@ def _run_mutations(
             skipped_long += 1
     if skipped_long:
         logger.info(
-            "  %d/%d records have sequences > %d AA; they will be truncated by compute_pll",
-            skipped_long, len(records), max_aa,
+            "  %d/%d records have sequences > %d AA; mutations past pos %d will be skipped",
+            skipped_long, len(records), max_aa, max_aa,
         )
 
+    model.eval()
     complex_results: dict[str, list[dict]] = defaultdict(list)
-    wt_pll_cache: dict[str, dict[str, float]] = {}
     n_errors = 0
+    n_skipped_truncation = 0
 
     for i, rec in enumerate(records):
         try:
-            cache_key = f"{rec['pdb_id']}_{rec['chain_id']}"
-            if cache_key not in wt_pll_cache:
-                wt_pll_cache[cache_key] = compute_pll(
-                    model, tokenizer, rec["wildtype_seq"], device, batch_size,
-                )
-            wt_pll = wt_pll_cache[cache_key]
-            mut_pll = compute_pll(
-                model, tokenizer, rec["mutant_seq"], device, batch_size,
+            score = _wildtype_marginal_score(
+                model, tokenizer,
+                rec["wildtype_seq"], rec["mutant_seq"],
+                device, max_aa,
             )
-            delta_pll = mut_pll["pll"] - wt_pll["pll"]
+            if score is None:
+                n_skipped_truncation += 1
+                continue
             complex_results[rec["pdb_id"]].append({
-                "ddg": rec["ddg"], "delta_pll": delta_pll,
+                "ddg": rec["ddg"], "delta_pll": score,
             })
         except RuntimeError as e:
             n_errors += 1
@@ -219,8 +320,17 @@ def _run_mutations(
                 "  Skipping mutation %d (%s): %s", i, rec.get("mutation_str", "?"), e,
             )
 
+    if n_skipped_truncation:
+        logger.info(
+            "  Skipped %d records whose mutation positions all fell past the truncation boundary",
+            n_skipped_truncation,
+        )
+
     if n_errors:
         logger.info("  Mutation benchmark: %d errors encountered", n_errors)
+
+    import math
+    from statistics import mean, median
 
     all_ddg, all_delta = [], []
     per_complex: dict[str, dict] = {}
@@ -232,18 +342,61 @@ def _run_mutations(
         entry: dict = {"n_mutants": len(results)}
         if len(results) >= 3 and len(set(ddgs)) > 1:
             rho, _ = spearmanr(ddgs, deltas)
-            entry["spearman_rho"] = float(rho)
+            if not math.isnan(rho):
+                entry["spearman_rho"] = float(rho)
+        # Per-complex AUROC: requires both labels present in this complex.
+        # The score (deltas) is wildtype-marginal log-likelihood ratio with
+        # the convention HIGHER = model predicts destabilizing, which lines
+        # up directly with binary_label=1 (destabilizing). No negation.
+        binary = [1 if d > 0 else 0 for d in ddgs]
+        if len(set(binary)) == 2:
+            try:
+                entry["binary_auroc"] = float(
+                    roc_auc_score(binary, deltas)
+                )
+            except ValueError:
+                pass
         per_complex[pdb_id] = entry
 
     summary: dict = {"n_complexes": len(complex_results), "n_mutants_total": len(all_ddg)}
+
+    # PRIMARY metrics: per-complex aggregations.
+    # The pooled metrics below are misleading because they're dominated by
+    # between-complex variance (Simpson's paradox) and don't reflect the
+    # model's actual within-complex predictive power.
+    per_c_spearmans = [
+        e["spearman_rho"] for e in per_complex.values() if "spearman_rho" in e
+    ]
+    per_c_aurocs = [
+        e["binary_auroc"] for e in per_complex.values() if "binary_auroc" in e
+    ]
+    if per_c_spearmans:
+        summary["mean_per_complex_spearman_rho"] = float(mean(per_c_spearmans))
+        summary["median_per_complex_spearman_rho"] = float(median(per_c_spearmans))
+        summary["n_complexes_with_spearman"] = len(per_c_spearmans)
+    if per_c_aurocs:
+        summary["mean_per_complex_auroc"] = float(mean(per_c_aurocs))
+        summary["median_per_complex_auroc"] = float(median(per_c_aurocs))
+        summary["n_complexes_with_auroc"] = len(per_c_aurocs)
+
+    # SECONDARY metrics: pooled across all mutations regardless of complex.
+    # Kept for backward compatibility, but treat with caution -- inflated by
+    # between-complex baseline differences.
     if len(all_ddg) >= 3:
         rho, _ = spearmanr(all_ddg, all_delta)
         r, _ = pearsonr(all_ddg, all_delta)
+        summary["pooled_spearman_rho"] = float(rho)
+        summary["pooled_pearson_r"] = float(r)
+        # Backward-compat aliases (pre-fix names)
         summary["overall_spearman_rho"] = float(rho)
         summary["overall_pearson_r"] = float(r)
     binary_labels = [1 if d > 0 else 0 for d in all_ddg]
     if len(set(binary_labels)) == 2:
-        summary["binary_auroc"] = float(roc_auc_score(binary_labels, [-d for d in all_delta]))
+        # Score is "destabilization prediction"; higher → destabilizing.
+        pooled_auroc = float(roc_auc_score(binary_labels, all_delta))
+        summary["pooled_binary_auroc"] = pooled_auroc
+        summary["binary_auroc"] = pooled_auroc  # backward-compat alias
+
     summary["per_complex"] = per_complex
     summary["n_errors"] = n_errors
     return summary
@@ -359,7 +512,7 @@ def run_experiment(
     _, eval_dataset = torch.utils.data.random_split(
         full_dataset,
         [len(full_dataset) - eval_size, eval_size],
-        generator=torch.Generator().manual_seed(config.seed),
+        generator=torch.Generator().manual_seed(EVAL_SPLIT_SEED),
     )
 
     # Set up the output path and load any existing results so crashed/killed
@@ -391,7 +544,7 @@ def run_experiment(
 
     eval_sections: list[tuple[str, bool, callable]] = [
         ("mlm", not args.skip_mlm, lambda: _run_mlm_eval(
-            model, tokenizer, config, eval_dataset, args.device, args.batch_size,
+            model, tokenizer, eval_dataset, args.device, args.batch_size,
         )),
         ("infilling", not args.skip_infilling, lambda: _run_infilling(
             model, tokenizer, eval_dataset, args.device, args.max_infilling_samples,
@@ -399,10 +552,9 @@ def run_experiment(
         ("pll", not args.skip_pll, lambda: _run_pll(
             model, tokenizer, eval_dataset, args.device,
             args.max_pll_sequences, args.pll_batch_size,
-            is_paired=config.data.paired,
         )),
         ("perplexity", not args.skip_perplexity, lambda: _run_perplexity(
-            model, tokenizer, config, eval_dataset, args.device, args.batch_size,
+            model, tokenizer, eval_dataset, args.device, args.batch_size,
         )),
         ("infilling_quality", not args.skip_infilling_quality, lambda: _run_infilling_quality(
             model, tokenizer, eval_dataset, args.device, args.max_infilling_quality_samples,
