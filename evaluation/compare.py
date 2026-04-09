@@ -368,41 +368,61 @@ def plot_training_curves(
     experiments: dict[str, ExperimentResult],
     output_path: str | Path,
 ) -> None:
-    """Overlay training curves (eval_loss and mlm_accuracy) for all experiments."""
-    fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(16, 6))
+    """Plot training curves for all experiments, one PNG per metric.
 
+    ``output_path`` is treated as a stem: passing
+    ``comparison_outputs/training_curves.png`` writes
+    ``training_curves_eval_loss.png`` and
+    ``training_curves_mlm_accuracy.png`` in the same directory.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    stem = output_path.stem
+    suffix = output_path.suffix or ".png"
+    parent = output_path.parent
+
+    # Pre-collect each experiment's eval history once so we can iterate
+    # over it twice (once per metric) without re-walking the dicts.
+    series: list[tuple[str, list[int], list[float | None], list[float | None]]] = []
     for name, exp in sorted(experiments.items()):
         if not exp.training_summary:
             continue
         history = exp.training_summary.get("eval_history", [])
         if not history:
             continue
-
         steps = [e["step"] for e in history]
         losses = [e.get("eval_loss") for e in history]
         accs = [e.get("eval_mlm_accuracy") for e in history]
+        series.append((name, steps, losses, accs))
 
-        ax_loss.plot(steps, losses, label=name, linewidth=1.5)
-        ax_acc.plot(steps, accs, label=name, linewidth=1.5)
+    if not series:
+        logger.warning("No training history found; skipping training curves")
+        return
 
-    ax_loss.set_xlabel("Step")
-    ax_loss.set_ylabel("Eval Loss")
-    ax_loss.set_title("Eval Loss vs Training Step")
-    ax_loss.legend()
-    ax_loss.grid(True, alpha=0.3)
+    metric_specs: list[tuple[str, str, str, int]] = [
+        # (filename suffix, y-axis label, title, index into series tuple)
+        ("eval_loss", "Eval Loss", "Eval Loss vs Training Step", 2),
+        ("mlm_accuracy", "MLM Accuracy", "MLM Accuracy vs Training Step", 3),
+    ]
 
-    ax_acc.set_xlabel("Step")
-    ax_acc.set_ylabel("MLM Accuracy")
-    ax_acc.set_title("MLM Accuracy vs Training Step")
-    ax_acc.legend()
-    ax_acc.grid(True, alpha=0.3)
+    for metric_key, ylabel, title, value_idx in metric_specs:
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+        for entry in series:
+            name = entry[0]
+            steps = entry[1]
+            values = entry[value_idx]
+            ax.plot(steps, values, label=name, linewidth=1.5)
+        ax.set_xlabel("Step")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
 
-    fig.tight_layout()
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150)
-    plt.close(fig)
-    logger.info("Training curves saved to %s", output_path)
+        out_file = parent / f"{stem}_{metric_key}{suffix}"
+        fig.savefig(out_file, dpi=150)
+        plt.close(fig)
+        logger.info("Training curve saved to %s", out_file)
 
 
 def plot_embedding_comparison(

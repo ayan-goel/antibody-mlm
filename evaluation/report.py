@@ -247,47 +247,54 @@ def plot_metric_comparison(
     experiments: dict[str, ExperimentResult],
     output_path: str | Path,
 ) -> None:
-    """Generate grouped bar charts comparing key metrics across experiments."""
+    """Generate grouped bar charts comparing key metrics across experiments.
+
+    One PNG per metric group. ``output_path`` is treated as a stem: passing
+    ``comparison_outputs/metric_comparison.png`` writes
+    ``metric_comparison_mlm_accuracy.png``, ``metric_comparison_perplexity.png``,
+    ``metric_comparison_cdr_infilling.png``, and ``metric_comparison_downstream.png``
+    in the same directory.
+    """
     names = sorted(experiments.keys())
     if not names:
         return
 
-    metric_groups: dict[str, list[tuple[str, str, str]]] = {
-        "MLM Accuracy": [("eval", k, l) for k, l in _PRETRAINING_METRICS],
-        "Perplexity": [
-            ("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS if "perplexity" in k
-        ],
-        "CDR Infilling": [
-            ("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS if "infill" in k
-        ],
-        "Downstream": [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS],
-    }
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    stem = output_path.stem
+    suffix = output_path.suffix or ".png"
+    parent = output_path.parent
 
-    groups_with_data: list[tuple[str, list[tuple[str, str, str]]]] = []
-    for group_name, specs in metric_groups.items():
-        has_any = False
-        for source, key, _ in specs:
-            if any(_get_metric(experiments[n], source, key) is not None for n in names):
-                has_any = True
-                break
-        if has_any:
-            groups_with_data.append((group_name, specs))
+    # (filename slug, display title, [(source, key, label), ...])
+    metric_groups: list[tuple[str, str, list[tuple[str, str, str]]]] = [
+        (
+            "mlm_accuracy",
+            "MLM Accuracy",
+            [("eval", k, l) for k, l in _PRETRAINING_METRICS],
+        ),
+        (
+            "perplexity",
+            "Perplexity",
+            [("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS if "perplexity" in k],
+        ),
+        (
+            "cdr_infilling",
+            "CDR Infilling",
+            [("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS if "infill" in k],
+        ),
+        (
+            "downstream",
+            "Downstream",
+            [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS],
+        ),
+    ]
 
-    if not groups_with_data:
-        logger.warning("No metric data for comparison plots")
-        return
-
-    n_groups = len(groups_with_data)
-    fig, axes = plt.subplots(1, n_groups, figsize=(6 * n_groups, 5), squeeze=False)
-
-    x = np.arange(len(names))
     bar_width = 0.8 / max(1, len(names))
+    any_plot_written = False
 
-    for ax_idx, (group_name, specs) in enumerate(groups_with_data):
-        ax = axes[0, ax_idx]
-        labels = []
+    for slug, title, specs in metric_groups:
+        labels: list[str] = []
         data_matrix: list[list[float | None]] = []
-
         for source, key, label in specs:
             vals = [_get_metric(experiments[n], source, key) for n in names]
             if any(v is not None for v in vals):
@@ -297,6 +304,7 @@ def plot_metric_comparison(
         if not labels:
             continue
 
+        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
         metric_x = np.arange(len(labels))
         for exp_idx, name in enumerate(names):
             offset = (exp_idx - len(names) / 2 + 0.5) * bar_width
@@ -306,15 +314,18 @@ def plot_metric_comparison(
             ]
             ax.bar(metric_x + offset, heights, bar_width, label=name, alpha=0.85)
 
-        ax.set_title(group_name)
+        ax.set_title(title)
         ax.set_xticks(metric_x)
-        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
 
-    fig.tight_layout()
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    logger.info("Metric comparison plot saved to %s", output_path)
+        out_file = parent / f"{stem}_{slug}{suffix}"
+        fig.savefig(out_file, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info("Metric comparison plot saved to %s", out_file)
+        any_plot_written = True
+
+    if not any_plot_written:
+        logger.warning("No metric data for comparison plots")
