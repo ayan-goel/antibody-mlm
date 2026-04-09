@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerBase
 
+from utils.tokenizer import tokenize_single_chain
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,25 +94,29 @@ def compute_pll(
         if not sequence:
             return {"pll": 0.0, "pll_normalized": 0.0, "was_truncated": False}
 
-        max_model_len = _get_max_seq_length(model)
-        was_truncated = False
-        if max_model_len is not None:
-            max_aa = max_model_len - 2  # reserve for [CLS] and [SEP]
-            if len(sequence) > max_aa:
-                logger.debug(
-                    "Truncating sequence from %d to %d AA (model max_position_embeddings=%d)",
-                    len(sequence), max_aa, max_model_len,
-                )
-                sequence = sequence[:max_aa]
-                was_truncated = True
+        max_model_len = _get_max_seq_length(model) or 512
 
-        spaced = " ".join(list(sequence))
-        encoding = tokenizer(
-            spaced, return_tensors="pt", padding=False,
-            truncation=True, max_length=max_model_len or 512,
-        )
-        input_ids = encoding["input_ids"].squeeze(0)
-        attention_mask = encoding["attention_mask"].squeeze(0)
+        # Reserve space for special tokens. Standard tokenizer adds
+        # [CLS]+[SEP] (2). Multispecific in heavy-only mode adds
+        # [CLS][MOD1][H]...[SEP] (4). Computing this here so the
+        # was_truncated flag matches what tokenize_single_chain emits.
+        additional = tokenizer.additional_special_tokens or []
+        num_special = 4 if "[MOD1]" in additional else 2
+        max_aa = max_model_len - num_special
+        was_truncated = len(sequence) > max_aa
+        if was_truncated:
+            logger.debug(
+                "Truncating sequence from %d to %d AA (model max_position_embeddings=%d)",
+                len(sequence), max_aa, max_model_len,
+            )
+            sequence = sequence[:max_aa]
+
+        # Use tokenize_single_chain so paired-model tokenizers add the
+        # [MOD1][H] framing they were trained with. The standard tokenizer
+        # path falls through to a normal tokenizer call inside the helper.
+        encoding = tokenize_single_chain(tokenizer, sequence, max_length=max_model_len)
+        input_ids = torch.tensor(encoding["input_ids"], dtype=torch.long)
+        attention_mask = torch.tensor(encoding["attention_mask"], dtype=torch.long)
 
     special_tokens = set(tokenizer.all_special_ids)
     mask_token_id = tokenizer.mask_token_id

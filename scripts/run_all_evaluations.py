@@ -36,7 +36,12 @@ from evaluation.pseudo_loglikelihood import compute_pll
 from masking import get_strategy
 from training.config import load_config
 from utils.seed import set_seed
-from utils.tokenizer import is_paired_checkpoint, load_tokenizer, load_tokenizer_multispecific
+from utils.tokenizer import (
+    is_paired_checkpoint,
+    load_tokenizer,
+    load_tokenizer_multispecific,
+    tokenize_single_chain,
+)
 
 # Held-out split seed: every model uses the SAME generator seed for the
 # train/eval random_split, regardless of its training-time `config.seed`.
@@ -174,7 +179,7 @@ def _wildtype_marginal_score(
     wt_seq: str,
     mut_seq: str,
     device: str,
-    max_aa: int,
+    max_pos: int,
 ) -> float | None:
     """Score a mutation via the ESM wildtype-marginal recipe.
 
@@ -194,43 +199,59 @@ def _wildtype_marginal_score(
     multi-point mutations because it isolates the per-position log-likelihood
     ratio at the actual mutation sites.
 
+    Works for both standard and paired (multispecific) tokenizers: the
+    AA → token position mapping is derived from ``special_tokens_mask``
+    rather than assuming a fixed ``[CLS]``-only prefix, so paired models
+    see the ``[CLS][MOD1][H] VH [SEP]`` framing they were trained on.
+
+    ``max_pos`` is the model's ``max_position_embeddings`` (the function
+    derives the framing-aware AA cap internally).
+
     Returns ``None`` if every mutation position lies past the truncation
     boundary (mutation effectively erased by length truncation).
     """
     if len(wt_seq) != len(mut_seq):
         return None  # indels not supported
 
-    # Find mutation positions. Reject the WHOLE record if ANY mutation site
-    # falls past the truncation window — partially-scored multi-point
-    # mutations would silently inject biased scores into the per-complex
-    # rank (a 3-mutation record reduced to 2 sites is on a different scale
-    # than a fully-scored 3-mutation record).
     positions = [i for i in range(len(wt_seq)) if wt_seq[i] != mut_seq[i]]
     if not positions:
         return None
+
+    # Reserve space for special tokens that the tokenizer prepends.
+    # Standard: [CLS] ... [SEP]                  → 2 specials
+    # Paired:   [CLS][MOD1][H] ... [SEP]         → 4 specials (heavy-only mode)
+    additional = tokenizer.additional_special_tokens or []
+    num_special = 4 if "[MOD1]" in additional else 2
+    max_aa = max_pos - num_special
+
+    # Reject the WHOLE record if ANY mutation site falls past the truncation
+    # window — partially-scored multi-point mutations would silently inject
+    # biased scores into the per-complex rank (a 3-mutation record reduced
+    # to 2 sites is on a different scale than a fully-scored 3-mutation one).
     if any(p >= max_aa for p in positions):
         return None
 
     wt_seq_t = wt_seq[:max_aa]
-    spaced = " ".join(list(wt_seq_t))
-    enc = tokenizer(
-        spaced, return_tensors="pt", padding=False,
-        truncation=True, max_length=max_aa + 2,
-    )
-    input_ids = enc["input_ids"].squeeze(0)
-    attention_mask = enc["attention_mask"].squeeze(0)
 
-    # Defensive: this function only supports the standard single-chain
-    # tokenization where [CLS] sits at index 0, so AA position p maps to
-    # token index p+1. Paired tokenizers prepend extra [MOD1]/[H] tokens
-    # which would invalidate the offset.
-    if input_ids[0].item() != tokenizer.cls_token_id:
-        return None  # unexpected tokenization layout — skip this record
+    # Use tokenize_single_chain so paired models get [MOD1][H] framing.
+    encoding = tokenize_single_chain(tokenizer, wt_seq_t, max_length=max_pos)
+    input_ids = torch.tensor(encoding["input_ids"], dtype=torch.long)
+    attention_mask = torch.tensor(encoding["attention_mask"], dtype=torch.long)
+    special_tokens_mask = encoding["special_tokens_mask"]
 
-    # AA positions start at token index 1 (after [CLS])
+    # Build AA position → token position map by walking the special-tokens
+    # mask. This is robust to either single-chain ([CLS] aa... [SEP]) or
+    # paired ([CLS][MOD1][H] aa... [SEP]) framing, and any future variant.
+    aa_to_token: list[int] = [
+        tok_pos for tok_pos, is_special in enumerate(special_tokens_mask) if not is_special
+    ]
+    if len(aa_to_token) < len(wt_seq_t):
+        # Tokenizer dropped some AAs (e.g. unexpected truncation); bail.
+        return None
+
     masked_ids = input_ids.clone()
     for p in positions:
-        masked_ids[p + 1] = tokenizer.mask_token_id
+        masked_ids[aa_to_token[p]] = tokenizer.mask_token_id
 
     masked_ids = masked_ids.unsqueeze(0).to(device)
     attention_mask = attention_mask.unsqueeze(0).to(device)
@@ -245,8 +266,9 @@ def _wildtype_marginal_score(
         mut_id = tokenizer.convert_tokens_to_ids(mut_seq[p])
         if wt_id == tokenizer.unk_token_id or mut_id == tokenizer.unk_token_id:
             continue
+        tok_pos = aa_to_token[p]
         # log p(wt) - log p(mut): high when model strongly prefers wildtype.
-        score += float(log_probs[p + 1, wt_id].item() - log_probs[p + 1, mut_id].item())
+        score += float(log_probs[tok_pos, wt_id].item() - log_probs[tok_pos, mut_id].item())
     return score
 
 
@@ -273,7 +295,14 @@ def _run_mutations(
         return {}
 
     max_pos = getattr(model.config, "max_position_embeddings", 256)
-    max_aa = max_pos - 2
+    # Reserve special-token slots: standard tokenizers add [CLS]+[SEP]
+    # (2 tokens), multispecific tokenizers in heavy-only mode add
+    # [CLS][MOD1][H]...[SEP] (4 tokens). Used here only for the
+    # `skipped_long` warning; the per-record truncation check lives
+    # inside _wildtype_marginal_score.
+    additional = tokenizer.additional_special_tokens or []
+    num_special = 4 if "[MOD1]" in additional else 2
+    max_aa = max_pos - num_special
     skipped_long = 0
     for rec in records:
         if len(rec["wildtype_seq"]) > max_aa or len(rec["mutant_seq"]) > max_aa:
@@ -294,7 +323,7 @@ def _run_mutations(
             score = _wildtype_marginal_score(
                 model, tokenizer,
                 rec["wildtype_seq"], rec["mutant_seq"],
-                device, max_aa,
+                device, max_pos,
             )
             if score is None:
                 n_skipped_truncation += 1
