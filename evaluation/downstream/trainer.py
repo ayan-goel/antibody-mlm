@@ -45,6 +45,22 @@ class DownstreamTrainer:
         self.config = config
         self.device = config.device
 
+    @staticmethod
+    def _seed_worker(worker_id: int) -> None:
+        """Pin each DataLoader worker's RNG to a deterministic seed.
+
+        Without this, finetune-mode train/eval loops produce different
+        shuffles and augmentations across runs even when ``set_seed(42)``
+        was called in the parent process, because PyTorch derives base
+        worker seeds from os.urandom unless overridden.
+        """
+        import random as _r
+        import numpy as _np
+        base = 42 + worker_id
+        torch.manual_seed(base)
+        _r.seed(base)
+        _np.random.seed(base)
+
     def train_probe(
         self,
         head: nn.Module,
@@ -175,13 +191,28 @@ class DownstreamTrainer:
         head.to(self.device)
         encoder.train()
 
+        # Move loss function (and any device-resident parameters such as
+        # binding's class-weight tensor) onto the model's device. The
+        # probe path already does this in train_probe(); without it, a
+        # binding finetune run with class-weighted CE crashes on the
+        # first batch with a CPU/GPU device mismatch.
+        if isinstance(loss_fn, nn.Module):
+            loss_fn = loss_fn.to(self.device)
+
+        worker_init = (
+            DownstreamTrainer._seed_worker
+            if self.config.num_workers > 0
+            else None
+        )
         train_loader = DataLoader(
             train_data, batch_size=self.config.batch_size, shuffle=True,
             num_workers=self.config.num_workers, collate_fn=collator,
+            worker_init_fn=worker_init,
         )
         val_loader = DataLoader(
             val_data, batch_size=self.config.batch_size, shuffle=False,
             num_workers=self.config.num_workers, collate_fn=collator,
+            worker_init_fn=worker_init,
         )
 
         optimizer = AdamW([

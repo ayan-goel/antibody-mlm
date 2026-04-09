@@ -74,6 +74,25 @@ class ParatopePredictionTask(BaseDownstreamTask):
     def build_head(self, hidden_size: int) -> nn.Module:
         return TokenClassificationHead(hidden_size, num_labels=1, dropout=0.1)
 
+    def fit_threshold(
+        self, predictions: torch.Tensor, labels: torch.Tensor,
+    ) -> None:
+        """Fit Youden's-J threshold on validation predictions.
+
+        Called once per seed by ``BaseDownstreamTask.run`` before scoring
+        the test set, so the F1/MCC threshold reflects val calibration
+        rather than leaking test labels.
+        """
+        if predictions.dim() == 3:
+            predictions = predictions.squeeze(-1)
+        preds_flat = predictions.view(-1)
+        labels_flat = labels.view(-1)
+        valid = labels_flat != -100
+        preds_v = torch.sigmoid(preds_flat[valid]).numpy()
+        labels_v = labels_flat[valid].numpy()
+        if len(np.unique(labels_v)) >= 2:
+            self._fitted_threshold = float(find_youdens_threshold(labels_v, preds_v))
+
     def compute_metrics(
         self, predictions: torch.Tensor, labels: torch.Tensor,
     ) -> dict[str, float]:
@@ -93,8 +112,10 @@ class ParatopePredictionTask(BaseDownstreamTask):
         auroc = float(roc_auc_score(labels_v, preds_v))
         auprc = float(average_precision_score(labels_v, preds_v))
 
-        threshold = find_youdens_threshold(labels_v, preds_v)
-        binary_preds = (preds_v >= threshold).astype(int)
+        # Threshold fit on val by fit_threshold() before this is called for
+        # test data; defaults to 0.5 if no fit happened. Must NOT be tuned
+        # on the test labels passed in here.
+        binary_preds = (preds_v >= self._fitted_threshold).astype(int)
         f1 = float(f1_score(labels_v, binary_preds, zero_division=0))
         mcc = float(matthews_corrcoef(labels_v, binary_preds))
 

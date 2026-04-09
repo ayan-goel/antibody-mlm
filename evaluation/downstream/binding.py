@@ -47,6 +47,20 @@ class BindingSpecificityTask(BaseDownstreamTask):
     def build_head(self, hidden_size: int) -> nn.Module:
         return SequenceClassificationHead(hidden_size, num_labels=2, dropout=0.1)
 
+    def fit_threshold(
+        self, predictions: torch.Tensor, labels: torch.Tensor,
+    ) -> None:
+        """Fit Youden's-J threshold on validation predictions.
+
+        Called once per seed by ``BaseDownstreamTask.run`` before scoring
+        the test set, so the F1/MCC threshold reflects val calibration
+        rather than leaking test labels.
+        """
+        probs = torch.softmax(predictions, dim=-1)[:, 1].numpy()
+        labels_np = labels.numpy()
+        if len(np.unique(labels_np)) >= 2:
+            self._fitted_threshold = float(find_youdens_threshold(labels_np, probs))
+
     def compute_metrics(
         self, predictions: torch.Tensor, labels: torch.Tensor,
     ) -> dict[str, float]:
@@ -59,11 +73,11 @@ class BindingSpecificityTask(BaseDownstreamTask):
         auroc = float(roc_auc_score(labels_np, probs))
         auprc = float(average_precision_score(labels_np, probs))
 
-        # Use Youden's J threshold instead of fixed 0.5: the loss is
-        # class-weighted CE which pushes logits asymmetrically, so a fixed
-        # 0.5 threshold under-reports F1/MCC compared to a calibrated cut.
-        threshold = find_youdens_threshold(labels_np, probs)
-        binary_preds = (probs >= threshold).astype(int)
+        # Threshold is fit on val by fit_threshold() before this is called
+        # for test data; defaults to 0.5 if no fit happened. Class-weighted
+        # CE pushes logits asymmetrically so a fixed 0.5 cut under-reports
+        # F1/MCC, but the threshold must NOT be tuned on test labels.
+        binary_preds = (probs >= self._fitted_threshold).astype(int)
         f1 = float(f1_score(labels_np, binary_preds, average="macro", zero_division=0))
         mcc = float(matthews_corrcoef(labels_np, binary_preds))
 

@@ -35,6 +35,23 @@ class BaseDownstreamTask(ABC):
 
     def __init__(self, config: DownstreamConfig) -> None:
         self.config = config
+        # Decision threshold fit on val by tasks that override fit_threshold().
+        # Default 0.5 means "use raw sigmoid > 0.5 / argmax" semantics.
+        # Set per-seed to avoid threshold leakage across model instances.
+        self._fitted_threshold: float = 0.5
+
+    def fit_threshold(
+        self, predictions: torch.Tensor, labels: torch.Tensor,
+    ) -> None:
+        """Fit any task-specific decision threshold on validation predictions.
+
+        Called once per seed after training but BEFORE test evaluation, so
+        that calibration-sensitive metrics (F1, MCC) reflect a threshold
+        tuned on held-out val data rather than the test set itself. Default
+        is a no-op; tasks like binding/paratope override this to compute
+        Youden's J on val and store ``self._fitted_threshold``.
+        """
+        return None
 
     @abstractmethod
     def load_data(self) -> tuple[Dataset, Dataset, Dataset]:
@@ -173,6 +190,12 @@ class BaseDownstreamTask(ABC):
 
             head = self.build_head(hidden_size)
 
+            # Reset any per-task state that should not leak across seeds.
+            # Tasks that override fit_threshold() will overwrite this on
+            # the next val pass; we reset to the safe default first so a
+            # disabled fit doesn't leak the previous seed's threshold.
+            self._fitted_threshold = 0.5
+
             if self.config.mode == "probe":
                 train_result = trainer.train_probe(
                     head=head,
@@ -183,6 +206,13 @@ class BaseDownstreamTask(ABC):
                     monitor_metric=self.monitor_metric,
                     higher_is_better=self.higher_is_better,
                 )
+                # Fit any task-specific decision threshold on val (with the
+                # best-state model already loaded by trainer.train_probe)
+                # BEFORE evaluating on test. Without this, F1/MCC are
+                # computed with a Youden's-J cut tuned to the test set
+                # itself, which is overly optimistic.
+                val_preds, val_labels_t = self._collect_predictions(head, cached_val)
+                self.fit_threshold(val_preds, val_labels_t)
                 test_metrics = self._evaluate_probe(head, cached_test)
             else:
                 encoder_copy = EncoderWrapper.from_checkpoint(
@@ -199,6 +229,13 @@ class BaseDownstreamTask(ABC):
                     monitor_metric=self.monitor_metric,
                     higher_is_better=self.higher_is_better,
                 )
+                # Fit threshold on val before scoring test for the finetune
+                # path too. Requires a forward pass through the encoder, so
+                # uses the val DataLoader directly.
+                val_preds, val_labels_t = self._collect_predictions_finetune(
+                    encoder_copy, head, val_data, tokenizer,
+                )
+                self.fit_threshold(val_preds, val_labels_t)
                 test_metrics = self._evaluate_finetune(encoder_copy, head, test_data, tokenizer)
 
             test_metrics["best_epoch"] = train_result["best_epoch"]
@@ -221,6 +258,69 @@ class BaseDownstreamTask(ABC):
         })
 
         return aggregated
+
+    def _collect_predictions(
+        self, head: nn.Module, cached_data: CachedEmbeddingDataset,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the head over cached embeddings and return (preds, labels) on CPU.
+
+        Used by fit_threshold() to compute decision thresholds on the
+        validation set so they don't leak onto the test set.
+        """
+        head.eval()
+        all_preds, all_labels = [], []
+        n = len(cached_data)
+        batch_size = self.config.batch_size
+        with torch.no_grad():
+            for i in range(0, n, batch_size):
+                hidden = cached_data.hidden_states[i : i + batch_size]
+                mask = cached_data.attention_mask[i : i + batch_size]
+                special_mask = cached_data.special_tokens_mask[i : i + batch_size]
+                labels = cached_data.labels_tensor[i : i + batch_size]
+                logits = DownstreamTrainer._forward_head(head, hidden, mask, special_mask)
+                all_preds.append(logits.cpu())
+                all_labels.append(labels.cpu())
+        return torch.cat(all_preds), torch.cat(all_labels)
+
+    def _collect_predictions_finetune(
+        self,
+        encoder: nn.Module,
+        head: nn.Module,
+        data: Dataset,
+        tokenizer: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run encoder+head over a raw Dataset and return (preds, labels) on CPU.
+
+        Finetune-mode counterpart of ``_collect_predictions``: needed because
+        finetune mode doesn't have a CachedEmbeddingDataset and must run a
+        full forward pass through the encoder for each example.
+        """
+        from torch.utils.data import DataLoader
+        from evaluation.downstream.collator import DownstreamCollator
+
+        collator = DownstreamCollator(tokenizer=tokenizer)
+        loader = DataLoader(
+            data, batch_size=self.config.batch_size, shuffle=False,
+            num_workers=self.config.num_workers, collate_fn=collator,
+            worker_init_fn=DownstreamTrainer._seed_worker if self.config.num_workers > 0 else None,
+        )
+        encoder.eval()
+        head.eval()
+        all_preds, all_labels = [], []
+        special_ids = torch.tensor(
+            list(tokenizer.all_special_ids), device=self.config.device,
+        )
+        with torch.no_grad():
+            for batch in loader:
+                input_ids = batch["input_ids"].to(self.config.device)
+                attention_mask = batch["attention_mask"].to(self.config.device)
+                labels = batch["labels"].to(self.config.device)
+                special_tokens_mask = torch.isin(input_ids, special_ids).long()
+                hidden = encoder(input_ids, attention_mask)
+                logits = DownstreamTrainer._forward_head(head, hidden, attention_mask, special_tokens_mask)
+                all_preds.append(logits.cpu())
+                all_labels.append(labels.cpu())
+        return torch.cat(all_preds), torch.cat(all_labels)
 
     def _evaluate_probe(
         self, head: nn.Module, test_data: CachedEmbeddingDataset
@@ -256,6 +356,7 @@ class BaseDownstreamTask(ABC):
         loader = DataLoader(
             test_data, batch_size=self.config.batch_size, shuffle=False,
             num_workers=self.config.num_workers, collate_fn=collator,
+            worker_init_fn=DownstreamTrainer._seed_worker if self.config.num_workers > 0 else None,
         )
         encoder.eval()
         head.eval()

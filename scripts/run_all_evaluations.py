@@ -36,7 +36,7 @@ from evaluation.pseudo_loglikelihood import compute_pll
 from masking import get_strategy
 from training.config import load_config
 from utils.seed import set_seed
-from utils.tokenizer import load_tokenizer, load_tokenizer_multispecific
+from utils.tokenizer import is_paired_checkpoint, load_tokenizer, load_tokenizer_multispecific
 
 # Held-out split seed: every model uses the SAME generator seed for the
 # train/eval random_split, regardless of its training-time `config.seed`.
@@ -479,6 +479,19 @@ def run_experiment(
 
     config = load_config(config_path)
     set_seed(config.seed)
+
+    # Guard against the experiments registry wiring a paired checkpoint to a
+    # single-chain config (or vice versa). The two paths use different
+    # tokenizers and embedding tables; mismatching them silently produces
+    # nonsense metrics rather than crashing, so detect it loudly here.
+    ckpt_is_paired = is_paired_checkpoint(checkpoint_path)
+    if ckpt_is_paired != config.data.paired:
+        raise ValueError(
+            f"Mismatch between checkpoint and config for experiment '{name}': "
+            f"is_paired_checkpoint('{checkpoint_path}') = {ckpt_is_paired} "
+            f"but config.data.paired = {config.data.paired}. "
+            f"Check the experiments registry."
+        )
 
     if config.data.paired:
         tokenizer = load_tokenizer_multispecific(config.model.model_name)

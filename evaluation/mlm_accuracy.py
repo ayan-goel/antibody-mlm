@@ -99,7 +99,17 @@ class MLMAccuracyEvaluator(BaseEvaluator):
         region_top5_correct: dict[str, int] = {r: 0 for r in _REGION_FILTERS}
         region_masked: dict[str, int] = {r: 0 for r in _REGION_FILTERS}
         region_nll: dict[str, float] = {r: 0.0 for r in _REGION_FILTERS}
+        # Light-chain accumulators (only populated for paired models, where
+        # the dataset provides chain_type_ids). Headline region metrics are
+        # heavy-chain only so paired and single-chain VH models can be
+        # compared on the same scale; light-chain numbers are kept as
+        # diagnostics under *_light keys.
+        region_correct_light: dict[str, int] = {r: 0 for r in _REGION_FILTERS}
+        region_top5_correct_light: dict[str, int] = {r: 0 for r in _REGION_FILTERS}
+        region_masked_light: dict[str, int] = {r: 0 for r in _REGION_FILTERS}
+        region_nll_light: dict[str, float] = {r: 0.0 for r in _REGION_FILTERS}
         has_regions = False
+        has_chains = False
 
         with torch.no_grad():
             for batch in tqdm(loader, desc="Evaluating MLM accuracy"):
@@ -133,12 +143,39 @@ class MLMAccuracyEvaluator(BaseEvaluator):
                 if "cdr_mask" in batch:
                     has_regions = True
                     cdr_mask = batch["cdr_mask"].to(self.device)
+                    # For paired datasets, restrict the headline region
+                    # accumulators to heavy-chain tokens only. Without this,
+                    # mlm_accuracy_cdr3 / perplexity_cdr3 would average over
+                    # VH-CDR3 + VL-CDR3 for paired models, making them
+                    # incomparable to single-chain VH-only baselines.
+                    chain_ids_t = batch.get("chain_type_ids")
+                    if chain_ids_t is not None:
+                        has_chains = True
+                        chain_ids_t = chain_ids_t.to(self.device)
+                        heavy_only = chain_ids_t == 1
+                        light_only = chain_ids_t == 2
+                    else:
+                        heavy_only = None
+                        light_only = None
+
                     for region, filter_fn in _REGION_FILTERS.items():
                         region_mask = mask & filter_fn(cdr_mask)
-                        region_correct[region] += correct[region_mask].sum().item()
-                        region_top5_correct[region] += top5_hit[region_mask].sum().item()
-                        region_masked[region] += region_mask.sum().item()
-                        region_nll[region] += per_token_nll[region_mask].sum().item()
+                        if heavy_only is not None:
+                            heavy_mask = region_mask & heavy_only
+                            light_mask = region_mask & light_only
+                            region_correct[region] += correct[heavy_mask].sum().item()
+                            region_top5_correct[region] += top5_hit[heavy_mask].sum().item()
+                            region_masked[region] += heavy_mask.sum().item()
+                            region_nll[region] += per_token_nll[heavy_mask].sum().item()
+                            region_correct_light[region] += correct[light_mask].sum().item()
+                            region_top5_correct_light[region] += top5_hit[light_mask].sum().item()
+                            region_masked_light[region] += light_mask.sum().item()
+                            region_nll_light[region] += per_token_nll[light_mask].sum().item()
+                        else:
+                            region_correct[region] += correct[region_mask].sum().item()
+                            region_top5_correct[region] += top5_hit[region_mask].sum().item()
+                            region_masked[region] += region_mask.sum().item()
+                            region_nll[region] += per_token_nll[region_mask].sum().item()
 
         def _safe_div(a: float, b: float) -> float:
             return a / b if b > 0 else 0.0
@@ -167,6 +204,22 @@ class MLMAccuracyEvaluator(BaseEvaluator):
                 metrics[f"perplexity_{region}"] = _perplexity(
                     region_nll[region], region_masked[region]
                 )
+            if has_chains:
+                # Light-chain diagnostics for paired models. The headline
+                # keys above are heavy-chain only, so paired vs single-chain
+                # comparisons are apples-to-apples on VH; *_light keys let
+                # us inspect VL prediction quality separately.
+                for region in _REGION_FILTERS:
+                    metrics[f"mlm_accuracy_{region}_light"] = _safe_div(
+                        region_correct_light[region], region_masked_light[region]
+                    )
+                    metrics[f"mlm_top5_accuracy_{region}_light"] = _safe_div(
+                        region_top5_correct_light[region], region_masked_light[region]
+                    )
+                    metrics[f"masked_tokens_{region}_light"] = region_masked_light[region]
+                    metrics[f"perplexity_{region}_light"] = _perplexity(
+                        region_nll_light[region], region_masked_light[region]
+                    )
 
         logger.info("MLM metrics: %s", metrics)
         return metrics
