@@ -40,9 +40,10 @@ def get_task(name: str, config: DownstreamConfig) -> BaseDownstreamTask:
     return TASK_REGISTRY[name](config)
 
 
-import evaluation.downstream.binding as _binding_module  # noqa: F401 — registers task
+import evaluation.downstream.contact_map as _contact_map_module  # noqa: F401 — registers task
 import evaluation.downstream.developability as _developability_module  # noqa: F401 — registers task
 import evaluation.downstream.paratope as _paratope_module  # noqa: F401 — registers task
+import evaluation.downstream.structure_probe as _structure_probe_module  # noqa: F401 — registers task
 
 __all__ = [
     "BaseDownstreamTask",

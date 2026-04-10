@@ -224,7 +224,11 @@ class CachedEmbeddingDataset(Dataset):
         aligned: list[torch.Tensor] = []
         for lab in labels:
             t = lab if isinstance(lab, torch.Tensor) else torch.tensor(lab)
-            is_token_level = t.dim() >= 1 and t.size(0) != seq_len and t.size(0) > seq_len // 4
+            is_token_level = (
+                t.dim() >= 1
+                and t.size(0) != seq_len
+                and seq_len // 4 < t.size(0) <= seq_len * 2
+            )
             if is_token_level:
                 pad = seq_len - t.size(0)
                 if pad > 0:

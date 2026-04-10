@@ -32,6 +32,7 @@ from evaluation.downstream import DownstreamConfig, get_task, load_downstream_co
 from evaluation.infilling import InfillingEvaluator
 from evaluation.infilling_quality import InfillingQualityAnalyzer
 from evaluation.mlm_accuracy import MLMAccuracyEvaluator
+from evaluation.attention_analysis import AttentionAnalyzer
 from evaluation.pseudo_loglikelihood import compute_pll
 from masking import get_strategy
 from training.config import load_config
@@ -171,6 +172,20 @@ def _run_infilling_quality(
     set_seed(42)
     analyzer = InfillingQualityAnalyzer(model=model, tokenizer=tokenizer, device=device)
     return analyzer.analyze(dataset=eval_dataset, max_samples=max_samples)
+
+
+def _run_attention_analysis(
+    model: torch.nn.Module, tokenizer, eval_dataset, device: str,
+    max_samples: int, coords_data: list | None = None,
+) -> dict:
+    """Run zero-shot attention entropy, head importance, and contact correlation."""
+    logger.info("  [Attention] Running attention perturbation analysis...")
+    set_seed(42)
+    analyzer = AttentionAnalyzer(
+        model=model, tokenizer=tokenizer, device=device,
+        coords_data=coords_data, max_samples=max_samples,
+    )
+    return analyzer.evaluate(dataset=eval_dataset)
 
 
 def _wildtype_marginal_score(
@@ -584,6 +599,13 @@ def run_experiment(
 
     _save_progress()  # create the file early so progress is visible
 
+    # Extract coords data for attention–contact correlation analysis.
+    # Only available when the dataset has structure annotations (e.g.
+    # structure_medium, hybrid_curriculum_medium). For Subset wrappers
+    # produced by random_split, access the underlying dataset's coords.
+    _base_dataset = getattr(eval_dataset, "dataset", eval_dataset)
+    coords_data = getattr(_base_dataset, "coords", None)
+
     eval_sections: list[tuple[str, bool, callable]] = [
         ("mlm", not args.skip_mlm, lambda: _run_mlm_eval(
             model, tokenizer, eval_dataset, args.device, args.batch_size,
@@ -600,6 +622,10 @@ def run_experiment(
         )),
         ("infilling_quality", not args.skip_infilling_quality, lambda: _run_infilling_quality(
             model, tokenizer, eval_dataset, args.device, args.max_infilling_quality_samples,
+        )),
+        ("attention_analysis", not args.skip_attention_analysis, lambda: _run_attention_analysis(
+            model, tokenizer, eval_dataset, args.device,
+            args.max_attention_samples, coords_data=coords_data,
         )),
         ("mutation_benchmark", not args.skip_mutations and not config.data.paired,
          lambda: _run_mutations(
@@ -694,6 +720,8 @@ def main() -> None:
     parser.add_argument("--skip-mutations", action="store_true")
     parser.add_argument("--skip-downstream", action="store_true")
     parser.add_argument("--skip-infilling-quality", action="store_true")
+    parser.add_argument("--skip-attention-analysis", action="store_true")
+    parser.add_argument("--max-attention-samples", type=int, default=200)
 
     args = parser.parse_args()
 

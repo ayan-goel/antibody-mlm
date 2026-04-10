@@ -33,5 +33,6 @@ experiments:
 # Downstream task configs applied to every experiment checkpoint.
 downstream_tasks:
   - configs/downstream/paratope_probe.yaml
-  - configs/downstream/binding_probe.yaml
   - configs/downstream/developability_probe.yaml
+  - configs/downstream/contact_map_probe.yaml
+  - configs/downstream/structure_probe_probe.yaml
