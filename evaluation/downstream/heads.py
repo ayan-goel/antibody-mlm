@@ -152,13 +152,18 @@ class ContactMapHead(nn.Module):
 
     Input:  hidden_states (B, L, H), attention_mask (B, L),
             special_tokens_mask (B, L)
-    Output: (B, n_pairs) — logits for upper-triangle AA-only pairs.
+    Output: (B, max_pairs) — logits for upper-triangle AA-only pairs,
+            padded per-sample to max_pairs so that variable-length
+            sequences in a batch all produce the same output size.
     """
 
-    def __init__(self, hidden_size: int, dropout: float = 0.1) -> None:
+    def __init__(
+        self, hidden_size: int, dropout: float = 0.1, max_pairs: int = 0,
+    ) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.bilinear = nn.Bilinear(hidden_size, hidden_size, 1, bias=True)
+        self.max_pairs = max_pairs
 
     def forward(
         self,
@@ -167,12 +172,25 @@ class ContactMapHead(nn.Module):
         special_tokens_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h = self.dropout(hidden_states)
-        idx_i, idx_j, _ = get_aa_pair_indices(attention_mask, special_tokens_mask)
-        if idx_i.numel() == 0:
-            return torch.zeros(h.size(0), 0, device=h.device)
-        h_i = h[:, idx_i]  # (B, n_pairs, H)
-        h_j = h[:, idx_j]  # (B, n_pairs, H)
-        return self.bilinear(h_i, h_j).squeeze(-1)  # (B, n_pairs)
+        B, device = h.size(0), h.device
+        results: list[torch.Tensor] = []
+        for b in range(B):
+            aa_mask = attention_mask[b] == 1
+            if special_tokens_mask is not None:
+                aa_mask = aa_mask & (special_tokens_mask[b] == 0)
+            aa_pos = aa_mask.nonzero(as_tuple=True)[0]
+            n_aa = aa_pos.size(0)
+            if n_aa < 2:
+                results.append(torch.zeros(self.max_pairs, device=device))
+                continue
+            tri_i, tri_j = torch.triu_indices(n_aa, n_aa, offset=1, device=device)
+            h_i = h[b, aa_pos[tri_i]].unsqueeze(0)  # (1, n_pairs, H)
+            h_j = h[b, aa_pos[tri_j]].unsqueeze(0)  # (1, n_pairs, H)
+            preds = self.bilinear(h_i, h_j).squeeze(-1).squeeze(0)  # (n_pairs,)
+            padded = torch.zeros(self.max_pairs, device=device)
+            padded[: preds.size(0)] = preds
+            results.append(padded)
+        return torch.stack(results)  # (B, max_pairs)
 
 
 class StructureProbeHead(nn.Module):
@@ -182,15 +200,19 @@ class StructureProbeHead(nn.Module):
 
     Input:  hidden_states (B, L, H), attention_mask (B, L),
             special_tokens_mask (B, L)
-    Output: (B, n_pairs) — predicted squared distances for AA-only pairs.
+    Output: (B, max_pairs) — predicted squared distances for AA-only
+            pairs, padded per-sample to max_pairs so that
+            variable-length sequences produce the same output size.
     """
 
     def __init__(
         self, hidden_size: int, probe_rank: int = 64, dropout: float = 0.1,
+        max_pairs: int = 0,
     ) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.transform = nn.Linear(hidden_size, probe_rank, bias=False)
+        self.max_pairs = max_pairs
 
     def forward(
         self,
@@ -200,11 +222,24 @@ class StructureProbeHead(nn.Module):
     ) -> torch.Tensor:
         h = self.dropout(hidden_states)
         Bh = self.transform(h)  # (B, L, rank)
-        idx_i, idx_j, _ = get_aa_pair_indices(attention_mask, special_tokens_mask)
-        if idx_i.numel() == 0:
-            return torch.zeros(h.size(0), 0, device=h.device)
-        diff = Bh[:, idx_i] - Bh[:, idx_j]  # (B, n_pairs, rank)
-        return (diff ** 2).sum(dim=-1)  # (B, n_pairs)
+        B, device = h.size(0), h.device
+        results: list[torch.Tensor] = []
+        for b in range(B):
+            aa_mask = attention_mask[b] == 1
+            if special_tokens_mask is not None:
+                aa_mask = aa_mask & (special_tokens_mask[b] == 0)
+            aa_pos = aa_mask.nonzero(as_tuple=True)[0]
+            n_aa = aa_pos.size(0)
+            if n_aa < 2:
+                results.append(torch.zeros(self.max_pairs, device=device))
+                continue
+            tri_i, tri_j = torch.triu_indices(n_aa, n_aa, offset=1, device=device)
+            diff = Bh[b, aa_pos[tri_i]] - Bh[b, aa_pos[tri_j]]  # (n_pairs, rank)
+            preds = (diff ** 2).sum(dim=-1)  # (n_pairs,)
+            padded = torch.zeros(self.max_pairs, device=device)
+            padded[: preds.size(0)] = preds
+            results.append(padded)
+        return torch.stack(results)  # (B, max_pairs)
 
 
 # ---------------------------------------------------------------------------

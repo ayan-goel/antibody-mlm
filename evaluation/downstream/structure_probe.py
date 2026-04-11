@@ -36,10 +36,14 @@ class StructureProbeTask(BaseDownstreamTask):
         tokenizer = load_tokenizer_for_checkpoint(
             self.config.checkpoint, self.config.model_name,
         )
-        return load_structure_probe_splits(tokenizer)
+        train, val, test = load_structure_probe_splits(tokenizer)
+        self._max_pairs = train.max_pairs
+        return train, val, test
 
     def build_head(self, hidden_size: int) -> nn.Module:
-        return StructureProbeHead(hidden_size, probe_rank=64, dropout=0.1)
+        return StructureProbeHead(
+            hidden_size, probe_rank=64, dropout=0.1, max_pairs=self._max_pairs,
+        )
 
     def compute_metrics(
         self, predictions: torch.Tensor, labels: torch.Tensor,

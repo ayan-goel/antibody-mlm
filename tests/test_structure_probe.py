@@ -17,7 +17,8 @@ from data.benchmarks.structure_probe import compute_distance_matrix
 class TestStructureProbeHead:
     def test_output_shape(self):
         B, L, H = 2, 20, 32
-        head = StructureProbeHead(hidden_size=H, probe_rank=16, dropout=0.0)
+        # 18 AA positions → 18*17/2 = 153 pairs; pad to 200
+        head = StructureProbeHead(hidden_size=H, probe_rank=16, dropout=0.0, max_pairs=200)
         hidden = torch.randn(B, L, H)
         attn_mask = torch.ones(B, L, dtype=torch.long)
         special_mask = torch.zeros(B, L, dtype=torch.long)
@@ -25,13 +26,15 @@ class TestStructureProbeHead:
         special_mask[:, -1] = 1
 
         output = head(hidden, attn_mask, special_mask)
-        # 18 AA positions → 18*17/2 = 153 pairs
-        assert output.shape == (B, 153)
+        assert output.shape == (B, 200)
+        # First 153 positions should have real values, rest should be zero
+        assert output[:, 153:].abs().sum() == 0
 
     def test_output_nonnegative(self):
         """Squared distances should always be non-negative."""
         B, L, H = 3, 10, 16
-        head = StructureProbeHead(hidden_size=H, probe_rank=8, dropout=0.0)
+        max_pairs = L * (L - 1) // 2
+        head = StructureProbeHead(hidden_size=H, probe_rank=8, dropout=0.0, max_pairs=max_pairs)
         hidden = torch.randn(B, L, H)
         attn_mask = torch.ones(B, L, dtype=torch.long)
         output = head(hidden, attn_mask)
@@ -39,12 +42,13 @@ class TestStructureProbeHead:
 
     def test_empty_with_all_special(self):
         B, L, H = 1, 5, 16
-        head = StructureProbeHead(hidden_size=H, probe_rank=8, dropout=0.0)
+        head = StructureProbeHead(hidden_size=H, probe_rank=8, dropout=0.0, max_pairs=10)
         hidden = torch.randn(B, L, H)
         attn_mask = torch.ones(B, L, dtype=torch.long)
         special_mask = torch.ones(B, L, dtype=torch.long)
         output = head(hidden, attn_mask, special_mask)
-        assert output.shape == (B, 0)
+        assert output.shape == (B, 10)
+        assert output.abs().sum() == 0  # all zeros since no AA positions
 
 
 class TestMaskedMSELoss:

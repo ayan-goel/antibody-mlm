@@ -45,7 +45,8 @@ class TestKnnToContactMatrix:
 class TestContactMapHead:
     def test_output_shape(self):
         B, L, H = 2, 20, 32
-        head = ContactMapHead(hidden_size=H, dropout=0.0)
+        # 18 AA positions → 18*17/2 = 153 pairs; pad to 200
+        head = ContactMapHead(hidden_size=H, dropout=0.0, max_pairs=200)
         hidden = torch.randn(B, L, H)
         attn_mask = torch.ones(B, L, dtype=torch.long)
         special_mask = torch.zeros(B, L, dtype=torch.long)
@@ -53,17 +54,19 @@ class TestContactMapHead:
         special_mask[:, -1] = 1  # [SEP]
 
         output = head(hidden, attn_mask, special_mask)
-        # 18 AA positions → 18*17/2 = 153 pairs
-        assert output.shape == (B, 153)
+        assert output.shape == (B, 200)
+        # Positions beyond 153 real pairs should be zero
+        assert output[:, 153:].abs().sum() == 0
 
     def test_empty_with_all_special(self):
         B, L, H = 1, 5, 16
-        head = ContactMapHead(hidden_size=H, dropout=0.0)
+        head = ContactMapHead(hidden_size=H, dropout=0.0, max_pairs=10)
         hidden = torch.randn(B, L, H)
         attn_mask = torch.ones(B, L, dtype=torch.long)
         special_mask = torch.ones(B, L, dtype=torch.long)  # all special
         output = head(hidden, attn_mask, special_mask)
-        assert output.shape == (B, 0)
+        assert output.shape == (B, 10)
+        assert output.abs().sum() == 0  # all zeros
 
 
 class TestMaskedBCEWithLogitsLoss:

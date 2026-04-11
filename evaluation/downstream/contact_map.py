@@ -33,10 +33,12 @@ class ContactMapTask(BaseDownstreamTask):
         tokenizer = load_tokenizer_for_checkpoint(
             self.config.checkpoint, self.config.model_name,
         )
-        return load_contact_map_splits(tokenizer)
+        train, val, test = load_contact_map_splits(tokenizer)
+        self._max_pairs = train.max_pairs
+        return train, val, test
 
     def build_head(self, hidden_size: int) -> nn.Module:
-        return ContactMapHead(hidden_size, dropout=0.1)
+        return ContactMapHead(hidden_size, dropout=0.1, max_pairs=self._max_pairs)
 
     def compute_metrics(
         self, predictions: torch.Tensor, labels: torch.Tensor,
