@@ -14,7 +14,7 @@ masking:
   mask_token_ratio: 0.8
   random_token_ratio: 0.1
   params:
-    k_neighbors: 32
+    k_neighbors: 5
 
 model:
   model_name: "alchemab/antiberta2"

@@ -105,63 +105,93 @@ class TestBudgetCorrectness:
         )
 
 
-class TestSpatialClustering:
-    """Masked positions should be closer together than a random sample."""
+class TestSpatialDispersion:
+    """Contact-preserving masking should spread masks in 3D space.
 
-    def test_masked_closer_than_random(self) -> None:
+    Masked residues' k nearest neighbors are protected from being
+    masked, so masked positions are on average farther apart than a
+    uniform random sample of the same size.
+    """
+
+    def test_masked_farther_than_random(self) -> None:
         torch.manual_seed(42)
-        strategy = StructureMasking(_make_tokenizer(), mask_prob=0.15, k_neighbors=16)
+        strategy = StructureMasking(_make_tokenizer(), mask_prob=0.15, k_neighbors=5)
         input_ids, special_mask = _make_inputs(100)
         coords = _make_linear_coords(100)
 
-        mask = strategy.select_mask_positions(
-            input_ids, special_mask, metadata={"coords_ca": coords}
+        # Average across multiple seeds to reduce variance
+        mean_masked_over_seeds = []
+        mean_rand_over_seeds = []
+        for seed in range(20):
+            torch.manual_seed(seed)
+            mask = strategy.select_mask_positions(
+                input_ids, special_mask, metadata={"coords_ca": coords}
+            )
+            masked_coords = coords[mask]
+            if masked_coords.size(0) < 2:
+                continue
+            masked_dists = torch.cdist(
+                masked_coords.unsqueeze(0), masked_coords.unsqueeze(0)
+            ).squeeze(0)
+            mean_masked_over_seeds.append(
+                masked_dists.sum().item()
+                / (masked_dists.numel() - masked_dists.size(0))
+            )
+
+            non_special = ~special_mask.bool()
+            all_coords = coords[non_special]
+            n_sample = int(mask.sum().item())
+            torch.manual_seed(1000 + seed)
+            rand_idx = torch.randperm(all_coords.size(0))[:n_sample]
+            rand_coords = all_coords[rand_idx]
+            rand_dists = torch.cdist(
+                rand_coords.unsqueeze(0), rand_coords.unsqueeze(0)
+            ).squeeze(0)
+            mean_rand_over_seeds.append(
+                rand_dists.sum().item()
+                / (rand_dists.numel() - rand_dists.size(0))
+            )
+
+        mean_masked = sum(mean_masked_over_seeds) / len(mean_masked_over_seeds)
+        mean_rand = sum(mean_rand_over_seeds) / len(mean_rand_over_seeds)
+
+        assert mean_masked > mean_rand, (
+            f"Masked mean dist {mean_masked:.1f} should be > random {mean_rand:.1f}"
         )
-        masked_coords = coords[mask]
 
-        if masked_coords.size(0) < 2:
-            pytest.skip("Too few masked positions for distance comparison")
+    def test_two_clusters_spans_both(self) -> None:
+        """With two far-apart clusters, masks should spread across both.
 
-        masked_dists = torch.cdist(
-            masked_coords.unsqueeze(0), masked_coords.unsqueeze(0)
-        ).squeeze(0)
-        mean_masked_dist = masked_dists.sum() / (masked_dists.numel() - masked_dists.size(0))
-
-        non_special = ~special_mask.bool()
-        all_coords = coords[non_special]
-        n_sample = int(mask.sum().item())
-        torch.manual_seed(123)
-        rand_idx = torch.randperm(all_coords.size(0))[:n_sample]
-        rand_coords = all_coords[rand_idx]
-        rand_dists = torch.cdist(
-            rand_coords.unsqueeze(0), rand_coords.unsqueeze(0)
-        ).squeeze(0)
-        mean_rand_dist = rand_dists.sum() / (rand_dists.numel() - rand_dists.size(0))
-
-        assert mean_masked_dist < mean_rand_dist, (
-            f"Masked mean dist {mean_masked_dist:.1f} should be < random {mean_rand_dist:.1f}"
-        )
-
-    def test_two_clusters_masks_one(self) -> None:
-        """With two far-apart clusters, a single seed should mask only one cluster."""
-        torch.manual_seed(7)
+        The inverted (contact-preserving) strategy picks seeds
+        uniformly at random but protects 3D neighbors, so after
+        masking a residue in cluster A it is still possible to mask
+        residues in cluster B (they are not spatial neighbors).
+        """
         seq_len = 60
-        strategy = StructureMasking(_make_tokenizer(), mask_prob=0.15, k_neighbors=32)
+        strategy = StructureMasking(_make_tokenizer(), mask_prob=0.3, k_neighbors=5)
         input_ids, special_mask = _make_inputs(seq_len)
         coords = _make_clustered_coords(seq_len)
 
-        mask = strategy.select_mask_positions(
-            input_ids, special_mask, metadata={"coords_ca": coords}
-        )
-        masked_coords = coords[mask]
-        if masked_coords.size(0) < 2:
-            return
+        spans_both = 0
+        trials = 20
+        for seed in range(trials):
+            torch.manual_seed(seed)
+            mask = strategy.select_mask_positions(
+                input_ids, special_mask, metadata={"coords_ca": coords}
+            )
+            masked_coords = coords[mask]
+            if masked_coords.size(0) < 2:
+                continue
+            x_values = masked_coords[:, 0]
+            has_near = (x_values < 50.0).any().item()
+            has_far = (x_values > 50.0).any().item()
+            if has_near and has_far:
+                spans_both += 1
 
-        x_values = masked_coords[:, 0]
-        near_origin = (x_values < 50.0).all().item()
-        near_far = (x_values > 50.0).all().item()
-        assert near_origin or near_far, (
-            "Masked positions span both clusters — expected only one"
+        # With 30% budget and contact preservation, most trials should
+        # naturally span both clusters.
+        assert spans_both >= trials // 2, (
+            f"Only {spans_both}/{trials} trials spanned both clusters"
         )
 
 

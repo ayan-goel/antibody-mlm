@@ -1,12 +1,20 @@
 """Generate comparison reports from evaluation results.
 
-Discovers all experiment results and produces terminal tables, CSV,
-LaTeX tables, Markdown summaries, and comparison plots.
+Discovers experiment results and produces terminal tables, CSV, LaTeX
+tables, Markdown summaries, and comparison plots.
+
+By default the report covers only the 7 single-chain masking strategies
+(uniform / cdr / span / structure / interface / germline /
+hybrid_curriculum). The paired-chain experiments (multispecific,
+hybrid_paired) were trained on a different data regime and are not
+directly comparable to single-chain models on the VH-only benchmarks;
+they are excluded unless --include-paired is passed.
 
 Usage:
     python scripts/generate_report.py
     python scripts/generate_report.py --output-dir comparison_outputs
-    python scripts/generate_report.py --checkpoints-dir models/checkpoints --eval-dir evaluation_outputs
+    python scripts/generate_report.py --include-paired   # include multispecific / hybrid_paired
+    python scripts/generate_report.py --experiments uniform_medium cdr_medium  # custom subset
 """
 
 from __future__ import annotations
@@ -39,6 +47,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Default set of experiments in the report: the 7 single-chain masking
+# strategies that share a training and evaluation regime and are directly
+# comparable on the VH-only benchmark suite.
+DEFAULT_SINGLE_CHAIN_EXPERIMENTS = [
+    "uniform_medium",
+    "cdr_medium",
+    "span_medium",
+    "structure_medium",
+    "interface_medium",
+    "germline_medium",
+    "hybrid_curriculum_medium",
+]
+
+# Paired-chain experiments that are excluded by default. Trained on
+# different data (OAS paired VH+VL) with a different tokenizer / vocab,
+# so VH-only benchmark numbers are not apples-to-apples.
+PAIRED_EXPERIMENTS = [
+    "multispecific_medium",
+    "hybrid_paired_medium",
+]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate comparison reports from evaluation results",
@@ -54,6 +84,22 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir", type=str, default="comparison_outputs",
+    )
+    parser.add_argument(
+        "--experiments", type=str, nargs="*", default=None,
+        help=(
+            "Explicit list of experiment names to include. Defaults to the "
+            "7 single-chain models. Paired-chain models are excluded by "
+            "default because they were trained on a different data regime "
+            "and the VH-only benchmarks are not directly comparable."
+        ),
+    )
+    parser.add_argument(
+        "--include-paired", action="store_true",
+        help=(
+            "Include paired-chain experiments (multispecific_medium, "
+            "hybrid_paired_medium) alongside the single-chain defaults."
+        ),
     )
     parser.add_argument(
         "--skip-plots", action="store_true",
@@ -83,7 +129,35 @@ def main() -> None:
         )
         return
 
-    logger.info("Found %d experiments: %s", len(experiments), list(experiments.keys()))
+    # Resolve which experiments to include in the report
+    if args.experiments is not None:
+        allowed = set(args.experiments)
+    elif args.include_paired:
+        allowed = set(DEFAULT_SINGLE_CHAIN_EXPERIMENTS) | set(PAIRED_EXPERIMENTS)
+    else:
+        allowed = set(DEFAULT_SINGLE_CHAIN_EXPERIMENTS)
+
+    discovered = set(experiments.keys())
+    missing = sorted(allowed - discovered)
+    if missing:
+        logger.warning(
+            "Requested experiments not found in eval outputs: %s (they will be skipped)",
+            missing,
+        )
+    excluded = sorted(discovered - allowed)
+    if excluded:
+        logger.info("Excluding experiments from report: %s", excluded)
+
+    experiments = {
+        name: exp for name, exp in experiments.items() if name in allowed
+    }
+    if not experiments:
+        logger.error(
+            "No experiments remain after filtering. Check --experiments / --include-paired.",
+        )
+        return
+
+    logger.info("Reporting on %d experiments: %s", len(experiments), sorted(experiments.keys()))
 
     table = build_comparison_table(experiments)
     print("\n" + format_table(table) + "\n")

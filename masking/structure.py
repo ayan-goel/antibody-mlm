@@ -1,19 +1,31 @@
-"""Structure-aware masking using 3D spatial neighborhoods.
+"""Structure-aware masking with contact preservation.
 
-Uses predicted Calpha coordinates to define kNN neighborhoods in 3D
-space, then masks spatially clustered residues via a seed-and-grow
-algorithm. Falls back to uniform masking when coordinates are
-unavailable for a sequence.
+Selects mask positions so that masked residues are spatially dispersed —
+their k nearest 3D neighbors remain visible. This teaches the model to
+USE spatial context (contact partners) when predicting a masked residue,
+instead of forcing it to predict with contacts hidden.
 
-The seed-and-grow approach:
-  1. Pick a random seed residue from maskable positions.
-  2. Add the seed and its k nearest 3D neighbors to the mask set
-     (closest first).
-  3. If budget is not yet filled, pick another seed and repeat.
-  4. Stop once the mask budget is reached.
+Contrast with seed-and-grow clustering, which masks a residue and its
+contacts together and produces representations that are less sensitive
+to contact information (worse downstream contact probing).
 
-Default k_neighbors=32 is supported by ProteinMPNN's finding that
-structural context saturates around 32-48 nearest Calpha neighbors.
+Requires per-token Calpha coordinates in ``metadata["coords_ca"]`` (float
+shape L x 3) or precomputed kNN indices in ``metadata["knn_indices"]``
+(int shape L x k). Positions with zero coordinates or empty kNN rows are
+excluded. Falls back to uniform masking when neither is available.
+
+Algorithm:
+  1. Build the set of maskable positions (non-special, has kNN data).
+  2. Shuffle them randomly.
+  3. Walk the shuffled list. For each position:
+     a. Skip if already masked or marked as a contact partner of an
+        already-masked residue.
+     b. Otherwise mask it and mark its k nearest 3D neighbors as
+        protected so they cannot be masked subsequently.
+  4. Stop when the mask budget is reached.
+  5. If protection over-constrains the problem and budget is not yet
+     met, fill remaining slots uniformly from any unprotected maskable
+     positions, then from any maskable positions as a last resort.
 """
 
 from __future__ import annotations
@@ -31,11 +43,11 @@ logger = logging.getLogger(__name__)
 
 @register_strategy("structure")
 class StructureMasking(BaseMaskingStrategy):
-    """3D neighborhood masking with seed-and-grow kNN selection.
+    """3D neighborhood masking via contact-preserving selection.
 
-    Requires per-token Calpha coordinates passed as metadata["coords_ca"]
-    (shape: seq_len x 3, dtype: float). Positions with zero coordinates
-    (special tokens, padding) are excluded from masking.
+    For each masked residue, its k nearest 3D neighbors are kept
+    visible. This lets the model learn to use spatial contacts as
+    context for predicting masked tokens.
     """
 
     def __init__(
@@ -44,7 +56,7 @@ class StructureMasking(BaseMaskingStrategy):
         mask_prob: float = 0.15,
         mask_token_ratio: float = 0.8,
         random_token_ratio: float = 0.1,
-        k_neighbors: int = 32,
+        k_neighbors: int = 5,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -94,48 +106,93 @@ class StructureMasking(BaseMaskingStrategy):
         else:
             return self._uniform_fallback(input_ids, special_tokens_mask)
 
-    def _seed_and_grow(
+    def _contact_preserving_select(
         self,
-        num_maskable: int,
+        seq_len: int,
+        maskable_idx: torch.Tensor,
+        knn_global: torch.Tensor,
         budget: int,
-        knn_local: torch.Tensor,
     ) -> torch.Tensor:
-        """Core seed-and-grow loop over a local kNN graph.
+        """Pick mask positions that do not share 3D neighborhoods.
 
         Args:
-            num_maskable: number of maskable positions.
-            budget: number of positions to mask.
-            knn_local: [num_maskable, k] neighbor indices in local (0-based) space.
+            seq_len: full token sequence length.
+            maskable_idx: [num_maskable] global indices of maskable positions.
+            knn_global: [num_maskable, k] neighbor indices in global (token)
+                space, one row per maskable position (same ordering).
+            budget: target number of positions to mask.
 
         Returns:
-            [num_maskable] boolean mask of selected positions.
+            [seq_len] boolean mask.
         """
-        mask_local = torch.zeros(num_maskable, dtype=torch.bool)
+        mask = torch.zeros(seq_len, dtype=torch.bool)
+        protected = torch.zeros(seq_len, dtype=torch.bool)
+
+        num_maskable = maskable_idx.numel()
+        if num_maskable == 0 or budget == 0:
+            return mask
+
+        perm = torch.randperm(num_maskable)
+        shuffled_pos = maskable_idx[perm]
+        shuffled_knn = knn_global[perm]
+
+        k = min(self.k_neighbors, shuffled_knn.size(1))
         masked_count = 0
-        used_as_seed = torch.zeros(num_maskable, dtype=torch.bool)
 
-        while masked_count < budget:
-            available_seeds = (~used_as_seed & ~mask_local).nonzero(as_tuple=True)[0]
-            if available_seeds.numel() == 0:
-                available_seeds = (~mask_local).nonzero(as_tuple=True)[0]
-                if available_seeds.numel() == 0:
-                    break
+        for i in range(num_maskable):
+            if masked_count >= budget:
+                break
+            pos = shuffled_pos[i].item()
+            if mask[pos] or protected[pos]:
+                continue
+            mask[pos] = True
+            masked_count += 1
+            for j in range(k):
+                neighbor = shuffled_knn[i, j].item()
+                if 0 <= neighbor < seq_len:
+                    protected[neighbor] = True
+            # Don't let protection mask out the residue itself
+            protected[pos] = True
 
-            seed = available_seeds[torch.randint(available_seeds.numel(), (1,)).item()].item()
-            used_as_seed[seed] = True
+        if masked_count >= budget:
+            return mask
 
-            if not mask_local[seed]:
-                mask_local[seed] = True
-                masked_count += 1
+        # Over-protection prevented us from hitting budget. Relax:
+        # fill from unprotected maskable positions first, then from any
+        # remaining maskable positions.
+        maskable_bool = torch.zeros(seq_len, dtype=torch.bool)
+        maskable_bool[maskable_idx] = True
 
-            for neighbor in knn_local[seed].tolist():
-                if masked_count >= budget:
-                    break
-                if not mask_local[neighbor]:
-                    mask_local[neighbor] = True
-                    masked_count += 1
+        unprotected = maskable_bool & (~mask) & (~protected)
+        masked_count = self._fill_from(
+            mask, unprotected, budget - masked_count, masked_count,
+        )
+        if masked_count < budget:
+            remaining = maskable_bool & (~mask)
+            self._fill_from(mask, remaining, budget - masked_count, masked_count)
 
-        return mask_local
+        return mask
+
+    @staticmethod
+    def _fill_from(
+        mask: torch.Tensor,
+        candidates: torch.Tensor,
+        n_more: int,
+        current: int,
+    ) -> int:
+        """Mask up to n_more positions sampled uniformly from candidates.
+
+        Mutates ``mask`` in place. Returns the new masked count.
+        """
+        if n_more <= 0:
+            return current
+        avail_idx = candidates.nonzero(as_tuple=True)[0]
+        if avail_idx.numel() == 0:
+            return current
+        take = min(n_more, avail_idx.numel())
+        perm = torch.randperm(avail_idx.numel())[:take]
+        mask[avail_idx[perm]] = True
+        return current + take
 
     def _mask_from_knn(
         self,
@@ -147,7 +204,6 @@ class StructureMasking(BaseMaskingStrategy):
         seq_len = input_ids.size(0)
         is_special = special_tokens_mask.bool()
 
-        # Maskable: non-special tokens with non-zero kNN rows
         has_neighbors = knn_indices.sum(dim=-1) > 0
         maskable = has_neighbors & (~is_special)
         maskable_idx = maskable.nonzero(as_tuple=True)[0]
@@ -158,30 +214,11 @@ class StructureMasking(BaseMaskingStrategy):
 
         budget = max(1, round(self.mask_prob * num_maskable))
 
-        # Build local-space kNN: map global token indices to local indices
-        global_to_local = torch.full((seq_len,), -1, dtype=torch.long)
-        global_to_local[maskable_idx] = torch.arange(num_maskable)
+        knn_global = knn_indices[maskable_idx].long().clamp(0, seq_len - 1)
 
-        knn_global = knn_indices[maskable_idx]  # [num_maskable, k]
-        # Clamp to valid range and map to local indices
-        knn_global = knn_global.clamp(0, seq_len - 1)
-        knn_local = global_to_local[knn_global]  # [num_maskable, k]
-        # Replace unmapped neighbors (-1) with self to avoid issues
-        for i in range(num_maskable):
-            knn_local[i][knn_local[i] < 0] = i
-
-        k = min(self.k_neighbors, num_maskable - 1)
-        if k == 0:
-            mask = torch.zeros(seq_len, dtype=torch.bool)
-            mask[maskable_idx[0]] = True
-            return mask
-
-        knn_local = knn_local[:, :k]
-
-        mask_local = self._seed_and_grow(num_maskable, budget, knn_local)
-        mask = torch.zeros(seq_len, dtype=torch.bool)
-        mask[maskable_idx[mask_local]] = True
-        return mask
+        return self._contact_preserving_select(
+            seq_len, maskable_idx, knn_global, budget,
+        )
 
     def _mask_from_coords(
         self,
@@ -202,6 +239,11 @@ class StructureMasking(BaseMaskingStrategy):
 
         budget = max(1, round(self.mask_prob * num_maskable))
 
+        if num_maskable == 1:
+            mask = torch.zeros(seq_len, dtype=torch.bool)
+            mask[maskable_idx[0]] = True
+            return mask
+
         maskable_coords = coords[maskable_idx]
         dists = torch.cdist(
             maskable_coords.unsqueeze(0),
@@ -209,15 +251,10 @@ class StructureMasking(BaseMaskingStrategy):
         ).squeeze(0)
 
         k = min(self.k_neighbors, num_maskable - 1)
-        if k == 0:
-            mask = torch.zeros(seq_len, dtype=torch.bool)
-            mask[maskable_idx[0]] = True
-            return mask
-
         _, knn_local = dists.topk(k + 1, dim=1, largest=False)
         knn_local = knn_local[:, 1:]
+        knn_global = maskable_idx[knn_local]
 
-        mask_local = self._seed_and_grow(num_maskable, budget, knn_local)
-        mask = torch.zeros(seq_len, dtype=torch.bool)
-        mask[maskable_idx[mask_local]] = True
-        return mask
+        return self._contact_preserving_select(
+            seq_len, maskable_idx, knn_global, budget,
+        )

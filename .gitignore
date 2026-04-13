@@ -25,6 +25,7 @@ data/tap.tab
 # Model checkpoints & weights
 # =============================================================
 models/checkpoints/
+models/paratope_teacher/
 *.pt
 *.bin
 *.safetensors
@@ -36,6 +37,7 @@ models/checkpoints/
 evaluation_outputs/
 downstream_outputs/
 comparison_outputs/
+old_results/
 
 # =============================================================
 # Experiment tracking

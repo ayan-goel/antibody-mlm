@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import torch
@@ -9,6 +10,8 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
 from utils.io import load_jsonl
+
+logger = logging.getLogger(__name__)
 
 CDR_FIELDS = {
     "cdr1_aa": 1,
@@ -21,22 +24,40 @@ def _build_cdr_region_labels(record: dict, seq_len: int) -> list[int]:
     """Build per-residue CDR region labels from OAS CDR amino acid fields.
 
     Returns a list of length seq_len where 0=framework, 1=CDR1, 2=CDR2, 3=CDR3.
-    Searches for each CDR substring sequentially so later CDRs are found after
-    earlier ones (avoids false matches from repeated subsequences).
+    CDR1 and CDR2 are located via sequential forward search (left-to-right).
+    CDR3 is located via rfind (rightmost match) because it is always anchored
+    at the C-terminus of the V region; a forward search from an inherited
+    search_start can match a false positive earlier in the framework when
+    CDR1/CDR2 lookups fail.
     """
     sequence = record["sequence"]
     labels = [0] * seq_len
     search_start = 0
-    for field, region_id in CDR_FIELDS.items():
+
+    for field, region_id in [("cdr1_aa", 1), ("cdr2_aa", 2)]:
         cdr_seq = record.get(field, "")
         if not cdr_seq:
             continue
         idx = sequence.find(cdr_seq, search_start)
         if idx == -1:
+            logger.debug(
+                "CDR%d substring %r not found after position %d",
+                region_id, cdr_seq, search_start,
+            )
             continue
-        for i in range(idx, idx + len(cdr_seq)):
+        for i in range(idx, min(idx + len(cdr_seq), seq_len)):
             labels[i] = region_id
         search_start = idx + len(cdr_seq)
+
+    cdr3_seq = record.get("cdr3_aa", "")
+    if cdr3_seq:
+        idx = sequence.rfind(cdr3_seq)
+        if idx == -1:
+            logger.debug("CDR3 substring %r not found in sequence", cdr3_seq)
+        else:
+            for i in range(idx, min(idx + len(cdr3_seq), seq_len)):
+                labels[i] = 3
+
     return labels
 
 
