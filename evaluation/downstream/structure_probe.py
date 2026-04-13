@@ -42,7 +42,7 @@ class StructureProbeTask(BaseDownstreamTask):
 
     def build_head(self, hidden_size: int) -> nn.Module:
         return StructureProbeHead(
-            hidden_size, probe_rank=64, dropout=0.1, max_pairs=self._max_pairs,
+            hidden_size, probe_rank=128, dropout=0.1, max_pairs=self._max_pairs,
         )
 
     def compute_metrics(
@@ -53,35 +53,51 @@ class StructureProbeTask(BaseDownstreamTask):
 
         valid = labels_flat != -100
         if valid.sum() < 10:
-            return {"spearman_distance": 0.0, "contact_precision_at_L": 0.0, "mse_distance": 0.0}
+            return {
+                "spearman_distance": 0.0,
+                "contact_precision_at_L": 0.0,
+                "rmse_distance_angstrom": 0.0,
+                "mse_squared_distance": 0.0,
+            }
 
         preds_v = preds_flat[valid]
         labels_v = labels_flat[valid]
 
-        # Spearman correlation between predicted and true squared distances
+        # Spearman correlation between predicted and true squared distances.
+        # Rank-based, so it's invariant to the squared-vs-linear units —
+        # this is the headline metric.
         rho, _ = spearmanr(preds_v, labels_v)
         if np.isnan(rho):
             rho = 0.0
 
-        # MSE on squared distances
-        mse = float(np.mean((preds_v - labels_v) ** 2))
+        # MSE on squared distances (Å²) — dominated by long-range pairs and
+        # not interpretable on its own. Keep it for the loss correspondence
+        # but report RMSE in Å as the headline scale metric: take sqrt of
+        # both sides before computing the error so we measure error in
+        # actual distance units.
+        mse_sq = float(np.mean((preds_v - labels_v) ** 2))
 
-        # Contact precision@L: threshold true distances at 8A (squared = 64)
-        # to get binary contacts. Rank predicted distances ascending
-        # (low distance = predicted contact).
+        preds_dist = np.sqrt(np.clip(preds_v, 0.0, None))
+        labels_dist = np.sqrt(np.clip(labels_v, 0.0, None))
+        rmse_angstrom = float(np.sqrt(np.mean((preds_dist - labels_dist) ** 2)))
+
+        # Contact precision@L: threshold true distances at 8 Å (squared = 64)
+        # to get binary contacts. Rank predicted distances ascending — small
+        # predicted distance = predicted contact.
         threshold_sq = CONTACT_THRESHOLD_ANGSTROM ** 2
         true_contacts = (labels_v < threshold_sq).astype(float)
         n_pairs = int(valid.sum())
         L = int(np.ceil((-1 + np.sqrt(1 + 8 * n_pairs)) / 2))
 
-        sorted_idx = np.argsort(preds_v)  # ascending — smallest predicted distance first
+        sorted_idx = np.argsort(preds_v)
         top_L = sorted_idx[:L]
         contact_prec = float(true_contacts[top_L].mean()) if L > 0 else 0.0
 
         return {
             "spearman_distance": float(rho),
             "contact_precision_at_L": contact_prec,
-            "mse_distance": mse,
+            "rmse_distance_angstrom": rmse_angstrom,
+            "mse_squared_distance": mse_sq,
         }
 
     @property

@@ -176,14 +176,24 @@ def _run_infilling_quality(
 
 def _run_attention_analysis(
     model: torch.nn.Module, tokenizer, eval_dataset, device: str,
-    max_samples: int, coords_data: list | None = None,
+    max_samples: int,
+    coords_data: list | None = None,
+    sabdab_real_coords: list | None = None,
 ) -> dict:
-    """Run zero-shot attention entropy, head importance, and contact correlation."""
+    """Run zero-shot attention entropy, head importance, and contact correlation.
+
+    When ``sabdab_real_coords`` is provided, the attention-contact
+    correlation runs against REAL X-ray crystal contacts (8 Å threshold)
+    from SAbDab Liberis. Otherwise it falls back to ``coords_data``,
+    which is the legacy ESM-2 kNN path.
+    """
     logger.info("  [Attention] Running attention perturbation analysis...")
     set_seed(42)
     analyzer = AttentionAnalyzer(
         model=model, tokenizer=tokenizer, device=device,
-        coords_data=coords_data, max_samples=max_samples,
+        coords_data=coords_data,
+        sabdab_real_coords=sabdab_real_coords,
+        max_samples=max_samples,
     )
     return analyzer.evaluate(dataset=eval_dataset)
 
@@ -606,6 +616,28 @@ def run_experiment(
     _base_dataset = getattr(eval_dataset, "dataset", eval_dataset)
     coords_data = getattr(_base_dataset, "coords", None)
 
+    # Load real X-ray crystal coordinates from SAbDab Liberis if
+    # available. The attention-contact correlation will run against
+    # these REAL contacts (8 Å threshold) instead of ESM-2 kNN.
+    sabdab_real_coords = None
+    sabdab_path = Path("data/structures/sabdab_liberis_coords.pt")
+    if sabdab_path.exists():
+        try:
+            sabdab_real_coords = torch.load(sabdab_path, weights_only=False)
+            logger.info(
+                "  Loaded %d SAbDab real-coords entries for attention analysis",
+                len(sabdab_real_coords),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("  Failed to load SAbDab coords from %s: %s", sabdab_path, e)
+            sabdab_real_coords = None
+    else:
+        logger.info(
+            "  %s not found — attention analysis will fall back to ESM-2 kNN. "
+            "Run scripts/build_sabdab_real_coords.py to enable real-contact correlation.",
+            sabdab_path,
+        )
+
     eval_sections: list[tuple[str, bool, callable]] = [
         ("mlm", not args.skip_mlm, lambda: _run_mlm_eval(
             model, tokenizer, eval_dataset, args.device, args.batch_size,
@@ -625,7 +657,9 @@ def run_experiment(
         )),
         ("attention_analysis", not args.skip_attention_analysis, lambda: _run_attention_analysis(
             model, tokenizer, eval_dataset, args.device,
-            args.max_attention_samples, coords_data=coords_data,
+            args.max_attention_samples,
+            coords_data=coords_data,
+            sabdab_real_coords=sabdab_real_coords,
         )),
         ("mutation_benchmark", not args.skip_mutations and not config.data.paired,
          lambda: _run_mutations(

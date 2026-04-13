@@ -76,19 +76,19 @@ class TestMaskedMSELoss:
 
 class TestComputeDistanceMatrix:
     def test_symmetric(self):
-        coords = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+        coords = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
         dist = compute_distance_matrix(coords)
         assert dist.shape == (3, 3)
         np.testing.assert_array_almost_equal(dist, dist.T)
 
     def test_diagonal_zero(self):
-        coords = [(0.0, 0.0, 0.0), (3.0, 4.0, 0.0)]
+        coords = np.array([(0.0, 0.0, 0.0), (3.0, 4.0, 0.0)])
         dist = compute_distance_matrix(coords)
         assert dist[0, 0] == pytest.approx(0.0)
         assert dist[1, 1] == pytest.approx(0.0)
 
     def test_known_distance(self):
-        coords = [(0.0, 0.0, 0.0), (3.0, 4.0, 0.0)]
+        coords = np.array([(0.0, 0.0, 0.0), (3.0, 4.0, 0.0)])
         dist = compute_distance_matrix(coords)
         assert dist[0, 1] == pytest.approx(5.0)
         assert dist[1, 0] == pytest.approx(5.0)

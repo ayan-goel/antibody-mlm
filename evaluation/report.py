@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _PRETRAINING_METRICS = [
     ("mlm_accuracy", "MLM Acc"),
+    ("mlm_top5_accuracy", "MLM Top-5"),
     ("mlm_accuracy_cdr", "MLM Acc (CDR)"),
     ("mlm_accuracy_cdr3", "MLM Acc (CDR3)"),
     ("mlm_accuracy_framework", "MLM Acc (FW)"),
@@ -30,29 +31,72 @@ _ZEROSHOT_METRICS = [
     ("perplexity_overall", "PPL"),
     ("perplexity_cdr", "PPL (CDR)"),
     ("perplexity_cdr3", "PPL (CDR3)"),
+    ("perplexity_framework", "PPL (FW)"),
+    ("pll_normalized_mean", "PLL (norm)"),
     ("infill_cdr1_accuracy", "Infill CDR1"),
     ("infill_cdr2_accuracy", "Infill CDR2"),
     ("infill_cdr3_accuracy", "Infill CDR3"),
-    ("pll_normalized_mean", "PLL (norm)"),
+    ("infill_cdr1_exact_match", "Infill CDR1 Exact"),
+    ("infill_cdr2_exact_match", "Infill CDR2 Exact"),
+    ("infill_cdr3_exact_match", "Infill CDR3 Exact"),
+    ("infill_cdr3_short_accuracy", "Infill CDR3 (short)"),
+    ("infill_cdr3_medium_accuracy", "Infill CDR3 (med)"),
+    ("infill_cdr3_long_accuracy", "Infill CDR3 (long)"),
+    ("nterm_accuracy", "N-term Acc"),
+    ("nterm_exact_match", "N-term Exact"),
+    ("scattered_accuracy_k1", "Scattered k=1"),
+    ("scattered_accuracy_k5", "Scattered k=5"),
+    ("scattered_accuracy_k10", "Scattered k=10"),
+    ("cdr1_jsd", "CDR1 JSD"),
+    ("cdr2_jsd", "CDR2 JSD"),
+    ("cdr3_jsd", "CDR3 JSD"),
 ]
 
 _MUTATION_METRICS = [
-    # Primary: per-complex aggregations.
-    # Mean spearman across complexes is the honest measure of within-complex
-    # ranking ability; the pooled spearman is dominated by between-complex
-    # variance (Simpson's paradox) and overstates model performance.
-    ("mean_per_complex_spearman_rho", "Mut. Spearman (per-cplx)"),
-    ("mean_per_complex_auroc", "Mut. AUROC (per-cplx)"),
-    ("pooled_spearman_rho", "Mut. Spearman (pooled)"),
-    ("pooled_binary_auroc", "Mut. AUROC (pooled)"),
+    # Per-complex aggregations are the only honest measure of within-complex
+    # ranking ability; pooled metrics are dominated by between-complex
+    # variance (Simpson's paradox) and overstate model performance, so we
+    # don't surface them in the table.
+    ("mean_per_complex_spearman_rho", "Mut. Spearman (mean per-cplx)"),
+    ("median_per_complex_spearman_rho", "Mut. Spearman (median per-cplx)"),
+    ("mean_per_complex_auroc", "Mut. AUROC (mean per-cplx)"),
+    ("median_per_complex_auroc", "Mut. AUROC (median per-cplx)"),
+    ("n_complexes", "Mut. # complexes"),
+    ("n_mutants_total", "Mut. # mutants"),
 ]
 
 _DOWNSTREAM_METRICS = [
+    # Paratope (sequence-level binary, per-token classification)
     ("paratope", "auroc_mean", "Para. AUROC"),
     ("paratope", "auprc_mean", "Para. AUPRC"),
-    ("binding", "auroc_mean", "Bind. AUROC"),
-    ("binding", "f1_mean", "Bind. F1"),
-    ("developability", "spearman_macro_mean", "Dev. Spearman"),
+    ("paratope", "f1_mean", "Para. F1"),
+    ("paratope", "mcc_mean", "Para. MCC"),
+    # Developability (5-target regression, macro Spearman + per-target)
+    ("developability", "spearman_macro_mean", "Dev. Spearman (macro)"),
+    ("developability", "spearman_CDR_Length_mean", "Dev. CDR Length"),
+    ("developability", "spearman_PSH_mean", "Dev. PSH"),
+    ("developability", "spearman_PPC_mean", "Dev. PPC"),
+    ("developability", "spearman_PNC_mean", "Dev. PNC"),
+    ("developability", "spearman_SFvCSP_mean", "Dev. SFvCSP"),
+    ("developability", "mse_original_scale_mean", "Dev. MSE (orig scale)"),
+    # Contact map (kNN-from-ESM2 contacts; long-range is the meaningful one)
+    ("contact_map", "auroc_mean", "Contact AUROC"),
+    ("contact_map", "long_range_auroc_mean", "Contact AUROC (long)"),
+    ("contact_map", "long_range_precision_at_L_mean", "Contact P@L (long)"),
+    ("contact_map", "long_range_precision_at_L5_mean", "Contact P@L/5 (long)"),
+    ("contact_map", "medium_long_auroc_mean", "Contact AUROC (med+long)"),
+    ("contact_map", "precision_at_L_mean", "Contact P@L (all)"),
+    # Structure probe (Hewitt-Manning linear probe on Calpha distances)
+    ("structure_probe", "spearman_distance_mean", "StructProbe Spearman"),
+    ("structure_probe", "contact_precision_at_L_mean", "StructProbe P@L"),
+    ("structure_probe", "rmse_distance_angstrom_mean", "StructProbe RMSE (Å)"),
+]
+
+_ATTENTION_METRICS = [
+    ("attn_entropy_mean", "Attn entropy (mean)"),
+    ("attn_entropy_layer0", "Attn entropy L0"),
+    ("attn_entropy_layer5", "Attn entropy L5"),
+    ("attn_entropy_layer11", "Attn entropy L11"),
 ]
 
 
@@ -64,6 +108,10 @@ def _get_metric(exp: ExperimentResult, source: str, key: str) -> float | None:
         return exp.zeroshot_metrics.get(key)
     if source == "mutation" and exp.mutation_metrics:
         return exp.mutation_metrics.get(key)
+    if source == "attention":
+        attn = getattr(exp, "attention_metrics", None)
+        if attn:
+            return attn.get(key)
     if source.startswith("ds_"):
         task = source[3:]
         if task in exp.downstream_metrics:
@@ -92,6 +140,8 @@ def generate_latex_table(
         metric_specs.append(("mutation", key, label))
     for task, key, label in _DOWNSTREAM_METRICS:
         metric_specs.append((f"ds_{task}", key, label))
+    for key, label in _ATTENTION_METRICS:
+        metric_specs.append(("attention", key, label))
 
     has_data: list[tuple[str, str, str]] = []
     for source, key, label in metric_specs:
@@ -170,70 +220,97 @@ def generate_markdown_summary(
     experiments: dict[str, ExperimentResult],
     output_path: str | Path,
 ) -> str:
-    """Generate a Markdown summary of all experiments."""
+    """Generate a Markdown summary of all experiments.
+
+    Sections, in order:
+      Pretraining → Zero-Shot → Mutation Benchmark → Downstream
+      (per task: Paratope, Developability, Contact Map, Structure Probe)
+      → Attention Analysis.
+
+    Empty sections (no experiment has data) are silently dropped so the
+    report doesn't show rows full of dashes.
+    """
     names = sorted(experiments.keys())
     if not names:
         return "No experiments found."
 
-    lines = [
+    sep = "|--------|" + "|".join("-------:" for _ in names) + "|"
+    header = "| Metric | " + " | ".join(names) + " |"
+
+    lines: list[str] = [
         "# Evaluation Summary",
         "",
         f"**Experiments:** {', '.join(names)}",
         "",
     ]
 
-    lines.append("## Pretraining Metrics")
-    lines.append("")
-    header = "| Metric | " + " | ".join(names) + " |"
-    sep = "|--------|" + "|".join("-------:" for _ in names) + "|"
-    lines.extend([header, sep])
-    for key, label in _PRETRAINING_METRICS:
-        vals = []
-        for n in names:
-            v = _get_metric(experiments[n], "eval", key)
-            vals.append(f"{v:.4f}" if v is not None else "--")
-        lines.append(f"| {label} | " + " | ".join(vals) + " |")
-    lines.append("")
-
-    lines.append("## Zero-Shot Metrics")
-    lines.append("")
-    header = "| Metric | " + " | ".join(names) + " |"
-    lines.extend([header, sep])
-    for key, label in _ZEROSHOT_METRICS:
-        vals = []
-        for n in names:
-            v = _get_metric(experiments[n], "zeroshot", key)
-            vals.append(f"{v:.4f}" if v is not None else "--")
-        lines.append(f"| {label} | " + " | ".join(vals) + " |")
-    lines.append("")
-
-    has_mutation = any(exp.mutation_metrics for exp in experiments.values())
-    if has_mutation:
-        lines.append("## Mutation Benchmark")
+    def _emit_section(
+        title: str,
+        rows: list[tuple[str, str, str]],
+        getter,
+    ) -> None:
+        """Append a section if any of `rows` has data for any experiment."""
+        if not any(getter(experiments[n], r[0], r[1]) is not None
+                   for r in rows for n in names):
+            return
+        lines.append(f"## {title}")
         lines.append("")
-        header = "| Metric | " + " | ".join(names) + " |"
         lines.extend([header, sep])
-        for key, label in _MUTATION_METRICS:
-            vals = []
+        for source, key, label in rows:
+            vals: list[str] = []
             for n in names:
-                v = _get_metric(experiments[n], "mutation", key)
-                vals.append(f"{v:.4f}" if v is not None else "--")
+                v = getter(experiments[n], source, key)
+                if v is None:
+                    vals.append("--")
+                elif isinstance(v, float):
+                    vals.append(f"{v:.4f}")
+                else:
+                    vals.append(str(v))
             lines.append(f"| {label} | " + " | ".join(vals) + " |")
         lines.append("")
 
-    has_downstream = any(exp.downstream_metrics for exp in experiments.values())
-    if has_downstream:
-        lines.append("## Downstream Tasks")
-        lines.append("")
-        header = "| Metric | " + " | ".join(names) + " |"
-        lines.extend([header, sep])
-        for task, key, label in _DOWNSTREAM_METRICS:
-            vals = []
-            for n in names:
-                v = _get_metric(experiments[n], f"ds_{task}", key)
-                vals.append(f"{v:.4f}" if v is not None else "--")
-            lines.append(f"| {label} | " + " | ".join(vals) + " |")
-        lines.append("")
+    _emit_section(
+        "Pretraining Metrics",
+        [("eval", k, l) for k, l in _PRETRAINING_METRICS],
+        _get_metric,
+    )
+    _emit_section(
+        "Zero-Shot Metrics",
+        [("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS],
+        _get_metric,
+    )
+    _emit_section(
+        "Mutation Benchmark",
+        [("mutation", k, l) for k, l in _MUTATION_METRICS],
+        _get_metric,
+    )
+
+    # Downstream: split by task so the table doesn't become unreadably wide
+    # when we add the per-target developability columns and contact_map
+    # long-range metrics.
+    by_task: dict[str, list[tuple[str, str, str]]] = {}
+    for task, key, label in _DOWNSTREAM_METRICS:
+        by_task.setdefault(task, []).append((f"ds_{task}", key, label))
+
+    task_titles = {
+        "paratope": "Paratope (TDC SAbDab_Liberis)",
+        "developability": "Developability (TDC TAP)",
+        "contact_map": "Contact Map (kNN-from-ESM2)",
+        "structure_probe": "Structure Probe (Hewitt-Manning, AB-Bind H/L)",
+        "binding": "Binding (CoV-AbDab)",
+    }
+    for task, rows in by_task.items():
+        _emit_section(
+            f"Downstream — {task_titles.get(task, task)}",
+            rows,
+            _get_metric,
+        )
+
+    _emit_section(
+        "Attention Analysis",
+        [("attention", k, l) for k, l in _ATTENTION_METRICS],
+        _get_metric,
+    )
 
     md_str = "\n".join(lines)
     output_path = Path(output_path)
@@ -283,9 +360,42 @@ def plot_metric_comparison(
             [("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS if "infill" in k],
         ),
         (
-            "downstream",
-            "Downstream",
-            [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS],
+            "infilling_quality",
+            "Infilling AA Distribution (JSD)",
+            [("zeroshot", k, l) for k, l in _ZEROSHOT_METRICS if k.endswith("_jsd")],
+        ),
+        (
+            "mutation",
+            "Mutation Effects (per-complex)",
+            [("mutation", k, l) for k, l in _MUTATION_METRICS
+             if "spearman" in k or "auroc" in k],
+        ),
+        (
+            "paratope",
+            "Paratope Prediction",
+            [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS if t == "paratope"],
+        ),
+        (
+            "developability",
+            "Developability",
+            [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS
+             if t == "developability" and k != "mse_original_scale_mean"],
+        ),
+        (
+            "contact_map",
+            "Contact Map",
+            [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS if t == "contact_map"],
+        ),
+        (
+            "structure_probe",
+            "Structure Probe",
+            [(f"ds_{t}", k, l) for t, k, l in _DOWNSTREAM_METRICS
+             if t == "structure_probe" and "rmse" not in k],
+        ),
+        (
+            "attention",
+            "Attention Entropy",
+            [("attention", k, l) for k, l in _ATTENTION_METRICS],
         ),
     ]
 

@@ -28,6 +28,7 @@ class ExperimentResult:
     eval_metrics: dict[str, Any] | None = None
     zeroshot_metrics: dict[str, Any] | None = None
     mutation_metrics: dict[str, Any] | None = None
+    attention_metrics: dict[str, Any] | None = None
     downstream_metrics: dict[str, dict[str, Any]] = field(default_factory=dict)
     all_metrics: dict[str, Any] | None = None
     checkpoint_dir: Path | None = None
@@ -189,6 +190,12 @@ def _unpack_all_metrics(
         # only stored the per_complex dict and the (misleading) pooled keys.
         _backfill_per_complex_mutation_metrics(exp.mutation_metrics)
 
+    attn = all_metrics.get("attention_analysis")
+    if isinstance(attn, dict) and "error" not in attn:
+        if exp.attention_metrics is None:
+            exp.attention_metrics = {}
+        exp.attention_metrics.update(attn)
+
     downstream = all_metrics.get("downstream")
     if isinstance(downstream, dict) and "error" not in downstream:
         for task_name, task_results in downstream.items():
@@ -259,25 +266,52 @@ _ZEROSHOT_KEYS = [
     "pll_mean", "pll_normalized_mean",
     "perplexity_overall", "perplexity_cdr", "perplexity_cdr3",
     "perplexity_framework",
-    "infill_cdr1_accuracy", "infill_cdr2_accuracy",
-    "infill_cdr3_accuracy", "infill_cdr3_exact_match",
-    "nterm_accuracy",
+    "infill_cdr1_accuracy", "infill_cdr2_accuracy", "infill_cdr3_accuracy",
+    "infill_cdr1_exact_match", "infill_cdr2_exact_match", "infill_cdr3_exact_match",
+    "infill_cdr3_short_accuracy", "infill_cdr3_medium_accuracy", "infill_cdr3_long_accuracy",
+    "nterm_accuracy", "nterm_exact_match",
+    "scattered_accuracy_k1", "scattered_accuracy_k5", "scattered_accuracy_k10",
+    "cdr1_jsd", "cdr2_jsd", "cdr3_jsd",
 ]
 
 _MUTATION_KEYS = [
-    # Primary: per-complex aggregations (Simpson's paradox–free)
+    # Per-complex aggregations are the only honest measure (Simpson's paradox).
     "mean_per_complex_spearman_rho",
     "median_per_complex_spearman_rho",
     "mean_per_complex_auroc",
-    # Secondary: pooled (kept for backward compat / sanity checks)
-    "pooled_spearman_rho",
-    "pooled_binary_auroc",
+    "median_per_complex_auroc",
+    "n_complexes",
+    "n_mutants_total",
+]
+
+_ATTENTION_KEYS = [
+    "attn_entropy_mean",
+    "attn_entropy_layer0",
+    "attn_entropy_layer5",
+    "attn_entropy_layer11",
 ]
 
 _DOWNSTREAM_METRIC_KEYS = {
     "paratope": ["auroc_mean", "auprc_mean", "f1_mean", "mcc_mean"],
     "binding": ["auroc_mean", "auprc_mean", "f1_mean", "mcc_mean"],
-    "developability": ["spearman_macro_mean"],
+    "developability": [
+        "spearman_macro_mean",
+        "spearman_CDR_Length_mean", "spearman_PSH_mean", "spearman_PPC_mean",
+        "spearman_PNC_mean", "spearman_SFvCSP_mean",
+        "mse_original_scale_mean",
+    ],
+    "contact_map": [
+        "auroc_mean",
+        "precision_at_L_mean", "precision_at_L2_mean", "precision_at_L5_mean",
+        "long_range_auroc_mean",
+        "long_range_precision_at_L_mean", "long_range_precision_at_L5_mean",
+        "medium_long_auroc_mean",
+    ],
+    "structure_probe": [
+        "spearman_distance_mean",
+        "contact_precision_at_L_mean",
+        "rmse_distance_angstrom_mean",
+    ],
 }
 
 
@@ -321,6 +355,11 @@ def build_comparison_table(
             for key in _MUTATION_KEYS:
                 if key in exp.mutation_metrics:
                     row[f"mut_{key}"] = exp.mutation_metrics[key]
+
+        if exp.attention_metrics:
+            for key in _ATTENTION_KEYS:
+                if key in exp.attention_metrics:
+                    row[f"attn_{key}"] = exp.attention_metrics[key]
 
         for task_name, task_results in sorted(exp.downstream_metrics.items()):
             metric_keys = _DOWNSTREAM_METRIC_KEYS.get(

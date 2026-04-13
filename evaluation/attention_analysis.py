@@ -37,11 +37,30 @@ class AttentionAnalyzer(BaseEvaluator):
         device: str = "cuda",
         coords_data: list | None = None,
         max_samples: int = 200,
+        sabdab_real_coords: list | None = None,
     ) -> None:
+        """
+        Args:
+            model, tokenizer, device, max_samples: standard.
+            coords_data: legacy ESM-2 kNN data aligned by index with the
+                eval ``dataset``. Each entry is ``{"knn_indices": tensor}``
+                or None. If provided (and ``sabdab_real_coords`` is not),
+                the attention–contact correlation runs against
+                ESM-2-derived contact maps. Deprecated.
+            sabdab_real_coords: list of dicts from
+                ``data/structures/sabdab_liberis_coords.pt``. Each entry
+                has ``{"sequence": str, "coords_ca": tensor(L, 3)}``.
+                When provided, the attention–contact correlation iterates
+                over these real-X-ray chains directly, tokenizing each
+                sequence on the fly. Bypasses the eval ``dataset`` for
+                that sub-analysis. Strongly preferred for paper-quality
+                results.
+        """
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
         self.coords_data = coords_data
+        self.sabdab_real_coords = sabdab_real_coords
         self.max_samples = max_samples
 
     def evaluate(self, dataset: Any = None, **kwargs: Any) -> dict[str, Any]:
@@ -54,10 +73,14 @@ class AttentionAnalyzer(BaseEvaluator):
         metrics: dict[str, Any] = {}
         metrics.update(self._attention_entropy(samples))
         metrics.update(self._head_importance(samples))
-        if self.coords_data is not None:
+        if self.sabdab_real_coords is not None:
+            metrics.update(self._attention_contact_correlation_real(
+                self.sabdab_real_coords[: self.max_samples]
+            ))
+        elif self.coords_data is not None:
             metrics.update(self._attention_contact_correlation(samples))
         else:
-            logger.info("  No coords_data provided — skipping attention–contact correlation")
+            logger.info("  No coords data provided — skipping attention–contact correlation")
         return metrics
 
     def _get_attentions(self, sample: dict) -> tuple[torch.Tensor, torch.Tensor]:
@@ -197,8 +220,122 @@ class AttentionAnalyzer(BaseEvaluator):
         correct = sum(1 for pos, true in zip(positions, true_tokens) if preds[pos].item() == true)
         return correct, len(positions)
 
+    def _attention_contact_correlation_real(
+        self, sabdab_entries: list[dict],
+    ) -> dict[str, float]:
+        """Correlate attention with REAL X-ray contact maps (SAbDab).
+
+        For each SAbDab antibody chain:
+          1. Tokenize its PDB-derived sequence
+          2. Run a forward pass to get attention weights
+          3. Build the contact map from real Calpha distances (8 Å threshold)
+          4. Compute Spearman correlation between attention and contact
+             over the upper triangle (sequence-aware indexing — only
+             non-special token positions)
+
+        Aggregates per-layer/head means across all chains.
+        """
+        from utils.tokenizer import tokenize_single_chain
+
+        logger.info(
+            "  [Attention] Computing attention-contact correlation against REAL "
+            "X-ray crystal contacts (SAbDab Liberis, 8 Å threshold)..."
+        )
+        if not sabdab_entries:
+            return {}
+
+        layer_head_corrs: dict[tuple[int, int], list[float]] = defaultdict(list)
+        n_used = 0
+        threshold_sq = 8.0 ** 2
+
+        for entry in tqdm(sabdab_entries, desc="Attn-contact corr (real)"):
+            sequence = entry["sequence"]
+            coords = entry["coords_ca"].float()
+            if len(sequence) < 10 or coords.size(0) < 10:
+                continue
+
+            # Tokenize on the fly. tokenize_single_chain handles both
+            # standard and multispecific (paired) tokenizers.
+            try:
+                encoding = tokenize_single_chain(self.tokenizer, sequence, max_length=256)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("Tokenization failed for %s: %s", entry.get("id", "?"), e)
+                continue
+
+            input_ids = torch.tensor(encoding["input_ids"], dtype=torch.long).unsqueeze(0).to(self.device)
+            attention_mask = torch.tensor(encoding["attention_mask"], dtype=torch.long).unsqueeze(0).to(self.device)
+            special_tokens_mask = encoding["special_tokens_mask"]
+
+            # Identify AA-only token positions (non-special, in attention mask).
+            aa_token_positions = [
+                i for i, sm in enumerate(special_tokens_mask) if sm == 0
+            ]
+            n_aa = min(len(aa_token_positions), coords.size(0))
+            if n_aa < 5:
+                continue
+            aa_token_positions = aa_token_positions[:n_aa]
+            coords_used = coords[:n_aa]
+
+            # Real contact matrix at 8 Å (squared distance < 64).
+            diff = coords_used.unsqueeze(0) - coords_used.unsqueeze(1)
+            dist_sq = (diff ** 2).sum(dim=-1)
+            contact = (dist_sq < threshold_sq).float()
+            contact.fill_diagonal_(0.0)
+
+            tri_i, tri_j = torch.triu_indices(n_aa, n_aa, offset=1)
+            contact_flat = contact[tri_i, tri_j].cpu().numpy()
+            if contact_flat.std() == 0:
+                continue
+
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    output_attentions=True,
+                )
+            # attentions: tuple of (1, n_heads, L, L) per layer
+            attentions = torch.stack([a.squeeze(0) for a in outputs.attentions])  # (n_layers, n_heads, L, L)
+            n_layers, n_heads = attentions.shape[0], attentions.shape[1]
+
+            # Index into the AA-only positions in token space.
+            aa_idx = torch.tensor(aa_token_positions, dtype=torch.long)
+            for layer in range(n_layers):
+                for head in range(n_heads):
+                    attn = attentions[layer, head][aa_idx][:, aa_idx].cpu()
+                    attn_flat = attn[tri_i, tri_j].numpy()
+                    if attn_flat.std() == 0:
+                        continue
+                    rho, _ = spearmanr(attn_flat, contact_flat)
+                    if not np.isnan(rho):
+                        layer_head_corrs[(layer, head)].append(float(rho))
+
+            n_used += 1
+
+        logger.info("  Real-contact correlation computed over %d chains", n_used)
+
+        metrics: dict[str, float] = {}
+        best_corr = -1.0
+        best_head = ""
+        for (layer, head), corrs in sorted(layer_head_corrs.items()):
+            mean_corr = float(np.mean(corrs))
+            metrics[f"attn_contact_corr_L{layer}_H{head}"] = mean_corr
+            if mean_corr > best_corr:
+                best_corr = mean_corr
+                best_head = f"L{layer}_H{head}"
+
+        if best_head:
+            metrics["best_structural_head"] = best_head
+            metrics["best_structural_head_corr"] = best_corr
+        metrics["attn_contact_n_samples"] = n_used
+        return metrics
+
     def _attention_contact_correlation(self, samples: list[dict]) -> dict[str, float]:
-        """Correlate attention matrices with structural contact matrices."""
+        """[DEPRECATED] Correlate attention with ESM-2 kNN contact maps.
+
+        Kept for backwards compatibility. Prefer
+        :meth:`_attention_contact_correlation_real` which uses REAL
+        X-ray crystal contacts instead of ESM-2's predictions.
+        """
         logger.info("  [Attention] Computing attention–contact correlation...")
         if self.coords_data is None:
             return {}

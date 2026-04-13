@@ -17,6 +17,7 @@ data/raw/
 data/processed/
 data/ab_bind/
 data/covabdab/
+data/sabdab/
 data/tap.tab
 *.jsonl
 
