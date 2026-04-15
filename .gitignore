@@ -20,6 +20,7 @@ data/covabdab/
 data/sabdab/
 data/tap.tab
 *.jsonl
+markdown/
 
 # =============================================================
 # Model checkpoints & weights
