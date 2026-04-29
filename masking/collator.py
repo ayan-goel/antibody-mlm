@@ -38,6 +38,13 @@ class MLMDataCollator:
     _CORE_KEYS = {"input_ids", "attention_mask", "special_tokens_mask"}
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        # Some strategies (HybridMasking with sampling_mode="per_batch") draw
+        # one sub-strategy per batch instead of per sample. Notify the
+        # strategy that a new batch is starting if it supports the hook.
+        begin_batch = getattr(self.strategy, "begin_batch", None)
+        if callable(begin_batch):
+            begin_batch()
+
         input_ids_list = [torch.tensor(ex["input_ids"], dtype=torch.long) for ex in examples]
         attention_mask_list = [torch.tensor(ex["attention_mask"], dtype=torch.long) for ex in examples]
         special_tokens_mask_list = [torch.tensor(ex["special_tokens_mask"], dtype=torch.long) for ex in examples]

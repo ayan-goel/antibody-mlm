@@ -49,6 +49,18 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "multispecific":     ("configs/multispecific_medium.yaml",     "multispecific_medium"),
     "hybrid_curriculum": ("configs/hybrid_curriculum_medium.yaml", "hybrid_curriculum_medium"),
     "hybrid_paired":     ("configs/hybrid_paired_medium.yaml",     "hybrid_paired_medium"),
+    # Post-paper optimizations introduced after the structure-prior
+    # upgrade (IgFold real coordinates). Each variant tests a separate
+    # design axis; see the yaml header for the specific motivation.
+    "structure_longrange":  ("configs/structure_longrange_medium.yaml",  "structure_longrange_medium"),
+    "intersection":         ("configs/intersection_medium.yaml",         "intersection_medium"),
+    "hybrid_stretched":     ("configs/hybrid_stretched_medium.yaml",     "hybrid_stretched_medium"),
+    "hybrid_reverse":       ("configs/hybrid_reverse_medium.yaml",       "hybrid_reverse_medium"),
+    "hybrid_warmstart":     ("configs/hybrid_warmstart_medium.yaml",     "hybrid_warmstart_medium"),
+    "hybrid_intersection":  ("configs/hybrid_intersection_medium.yaml",  "hybrid_intersection_medium"),
+    "hybrid_perbatch":      ("configs/hybrid_perbatch_medium.yaml",      "hybrid_perbatch_medium"),
+    "hybrid_weighted":      ("configs/hybrid_weighted_medium.yaml",      "hybrid_weighted_medium"),
+    "hybrid_adaptive":      ("configs/hybrid_adaptive_medium.yaml",      "hybrid_adaptive_medium"),
 }
 
 

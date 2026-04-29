@@ -33,6 +33,10 @@ STRATEGY_REQUIRED_METADATA: dict[str, set[str]] = {
     "interface": {"paratope_labels"},
     "germline": {"germline_labels"},
     "multispecific": {"module_ids", "chain_type_ids"},
+    # Intersection masker checks its own priors at runtime; the hybrid
+    # outer layer only needs to confirm that the metadata dict is non-None
+    # so the inner masker has a chance to fall back gracefully.
+    "intersection": set(),
 }
 
 
@@ -75,6 +79,10 @@ class HybridMasking(BaseMaskingStrategy):
         policy_weights: list[float] | None = None,
         sub_strategy_params: dict[str, dict[str, Any]] | None = None,
         curriculum: list[dict[str, Any]] | None = None,
+        sampling_mode: str = "per_sample",
+        adaptive: bool = False,
+        adaptive_decay: float = 0.99,
+        adaptive_temperature: float = 1.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -139,6 +147,34 @@ class HybridMasking(BaseMaskingStrategy):
                 **params,
             )
 
+        # Sampling mode: per_sample (default) draws one sub-strategy per
+        # forward call (i.e. per sample, since the collator dispatches per
+        # sequence). per_batch draws one sub-strategy per forward batch, so
+        # all samples in a batch share the same inductive bias and the
+        # gradient is a "pure" specialist signal that step.
+        if sampling_mode not in ("per_sample", "per_batch"):
+            raise ValueError(
+                f"sampling_mode must be 'per_sample' or 'per_batch', got {sampling_mode!r}"
+            )
+        self._sampling_mode = sampling_mode
+        self._batch_strategy_index: int | None = None
+
+        # Adaptive (self-paced) curriculum: track per-strategy EMA of recent
+        # loss; choose the strategy whose tracked loss is highest so the
+        # model spends gradient budget on its weak spots. Disabled by
+        # default (deterministic curriculum behavior).
+        self._adaptive = adaptive
+        self._adaptive_decay = float(adaptive_decay)
+        self._adaptive_temperature = float(adaptive_temperature)
+        self._loss_ema = torch.full(
+            (n,), float("nan"), dtype=torch.float,
+        ).share_memory_()
+        # Last-sampled strategy index per call, used so an external
+        # callback can attribute a loss back to the correct sub-strategy.
+        self._last_strategy_index = torch.full(
+            (1,), -1, dtype=torch.long,
+        ).share_memory_()
+
         # Diagnostics
         self._total_calls = 0
         self._strategy_counts: dict[str, int] = {n: 0 for n in self._strategy_names}
@@ -149,6 +185,10 @@ class HybridMasking(BaseMaskingStrategy):
         logger.info(
             "HybridMasking initialized with %d sub-strategies: %s",
             n, self._strategy_names,
+        )
+        logger.info(
+            "sampling_mode=%s, adaptive=%s",
+            self._sampling_mode, self._adaptive,
         )
         logger.info(
             "Initial weights: %s",
@@ -196,6 +236,71 @@ class HybridMasking(BaseMaskingStrategy):
         # In-place write to the shared-memory tensor.
         self._current_weights.copy_(new_weights)
 
+    def begin_batch(self) -> None:
+        """Hook called by the collator at the start of every batch.
+
+        In per_batch sampling mode this draws the single strategy that all
+        samples in the batch will share. No-op in per_sample mode.
+        """
+        if self._sampling_mode != "per_batch":
+            self._batch_strategy_index = None
+            return
+        # Sample once per batch. We don't know yet which sub-strategies
+        # have metadata (depends on the samples), so we pick from the full
+        # weight vector and rely on per-sample fallback when a sample is
+        # missing the chosen strategy's metadata.
+        weights = self._effective_policy_weights().clone()
+        if (weights <= 0).all():
+            self._batch_strategy_index = 0
+        else:
+            weights = weights / weights.sum()
+            self._batch_strategy_index = int(torch.multinomial(weights, 1).item())
+
+    def update_loss(self, strategy_index: int, loss: float) -> None:
+        """Update the per-strategy loss EMA from a training callback.
+
+        Used by the adaptive sampler. Called after the model produces a
+        loss for a batch tagged with which sub-strategy generated it.
+        """
+        if not self._adaptive:
+            return
+        if not (0 <= strategy_index < len(self._strategy_names)):
+            return
+        prev = self._loss_ema[strategy_index].item()
+        if prev != prev:  # NaN check — first observation
+            self._loss_ema[strategy_index] = float(loss)
+        else:
+            self._loss_ema[strategy_index] = (
+                self._adaptive_decay * prev
+                + (1 - self._adaptive_decay) * float(loss)
+            )
+
+    def _effective_policy_weights(self) -> torch.Tensor:
+        """Return the policy weights to use for this step, before per-sample
+        availability filtering."""
+        if not self._adaptive:
+            return self._current_weights
+        # Adaptive mode: blend the curriculum policy with a softmax over
+        # per-strategy loss EMAs, so we shift gradient toward strategies
+        # the model is currently struggling with. Strategies that haven't
+        # been seen yet get NaN -> treat as max so they get explored.
+        ema = self._loss_ema.clone()
+        seen = ~torch.isnan(ema)
+        if not seen.any():
+            return self._current_weights
+        # Replace NaN with max-seen-loss + small bonus to encourage exploration
+        max_seen = ema[seen].max() if seen.any() else 1.0
+        ema = torch.where(seen, ema, max_seen + 0.5)
+        # Softmax over scaled losses
+        scaled = ema / max(self._adaptive_temperature, 1e-6)
+        scaled = scaled - scaled.max()  # stabilize
+        soft = torch.softmax(scaled, dim=0)
+        # Multiplicatively combine with curriculum weights
+        combined = self._current_weights * soft
+        if combined.sum() <= 0:
+            return self._current_weights
+        return combined / combined.sum()
+
     def select_mask_positions(
         self,
         input_ids: torch.Tensor,
@@ -205,12 +310,13 @@ class HybridMasking(BaseMaskingStrategy):
         self._total_calls += 1
 
         # Filter to available sub-strategies for this sample
+        eff_weights = self._effective_policy_weights()
         available_indices = []
         available_weights = []
         for i, name in enumerate(self._strategy_names):
             if _strategy_available(name, metadata):
                 available_indices.append(i)
-                available_weights.append(self._current_weights[i].item())
+                available_weights.append(eff_weights[i].item())
 
         # Fallback: no strategy available (shouldn't happen if uniform is included)
         if not available_indices:
@@ -220,13 +326,25 @@ class HybridMasking(BaseMaskingStrategy):
             return torch.bernoulli(probability_matrix).bool()
 
         # Sample one sub-strategy
-        weights_tensor = torch.tensor(available_weights, dtype=torch.float)
-        weights_tensor = weights_tensor / weights_tensor.sum()
-        selected_idx = torch.multinomial(weights_tensor, 1).item()
-        strategy_index = available_indices[selected_idx]
+        if (
+            self._sampling_mode == "per_batch"
+            and self._batch_strategy_index is not None
+            and self._batch_strategy_index in available_indices
+        ):
+            strategy_index = self._batch_strategy_index
+        else:
+            weights_tensor = torch.tensor(available_weights, dtype=torch.float)
+            wsum = weights_tensor.sum()
+            if wsum <= 0:
+                strategy_index = available_indices[0]
+            else:
+                weights_tensor = weights_tensor / wsum
+                selected_idx = torch.multinomial(weights_tensor, 1).item()
+                strategy_index = available_indices[selected_idx]
         strategy_name = self._strategy_names[strategy_index]
 
         self._strategy_counts[strategy_name] += 1
+        self._last_strategy_index[0] = strategy_index
 
         # Periodic logging
         if self._total_calls % self._log_interval == 0:

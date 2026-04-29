@@ -6,7 +6,7 @@ data:
   min_length: 80
   train_split: 0.9
   valid_amino_acids: "ACDEFGHIKLMNPQRSTVWY"
-  coords_path: "data/structures/oas_vh_500k_coords.pt"
+  coords_path: "data/structures/oas_vh_500k_igfold.pt"
 
 masking:
   strategy: "structure"

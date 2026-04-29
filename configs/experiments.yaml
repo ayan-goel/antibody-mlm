@@ -29,6 +29,34 @@ experiments:
   hybrid_paired_medium:
     config: configs/hybrid_paired_medium.yaml
     checkpoint: models/checkpoints/hybrid_paired_medium/final
+  # Post-paper variants exploring structure-prior and curriculum optimizations.
+  structure_longrange_medium:
+    config: configs/structure_longrange_medium.yaml
+    checkpoint: models/checkpoints/structure_longrange_medium/final
+  intersection_medium:
+    config: configs/intersection_medium.yaml
+    checkpoint: models/checkpoints/intersection_medium/final
+  hybrid_stretched_medium:
+    config: configs/hybrid_stretched_medium.yaml
+    checkpoint: models/checkpoints/hybrid_stretched_medium/final
+  hybrid_reverse_medium:
+    config: configs/hybrid_reverse_medium.yaml
+    checkpoint: models/checkpoints/hybrid_reverse_medium/final
+  hybrid_warmstart_medium:
+    config: configs/hybrid_warmstart_medium.yaml
+    checkpoint: models/checkpoints/hybrid_warmstart_medium/final
+  hybrid_intersection_medium:
+    config: configs/hybrid_intersection_medium.yaml
+    checkpoint: models/checkpoints/hybrid_intersection_medium/final
+  hybrid_perbatch_medium:
+    config: configs/hybrid_perbatch_medium.yaml
+    checkpoint: models/checkpoints/hybrid_perbatch_medium/final
+  hybrid_weighted_medium:
+    config: configs/hybrid_weighted_medium.yaml
+    checkpoint: models/checkpoints/hybrid_weighted_medium/final
+  hybrid_adaptive_medium:
+    config: configs/hybrid_adaptive_medium.yaml
+    checkpoint: models/checkpoints/hybrid_adaptive_medium/final
 
 # Downstream task configs applied to every experiment checkpoint.
 downstream_tasks:

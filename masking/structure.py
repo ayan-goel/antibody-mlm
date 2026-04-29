@@ -57,6 +57,7 @@ class StructureMasking(BaseMaskingStrategy):
         mask_token_ratio: float = 0.8,
         random_token_ratio: float = 0.1,
         k_neighbors: int = 5,
+        min_seq_separation: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -67,6 +68,13 @@ class StructureMasking(BaseMaskingStrategy):
             **kwargs,
         )
         self.k_neighbors = k_neighbors
+        # Drop neighbors with |i - j| <= min_seq_separation from the kNN list
+        # before masking. With real Cα coordinates, the top-k by Euclidean
+        # distance is dominated by sequence-adjacent residues (i±1, i±2, ...)
+        # because the backbone is rigid; setting min_seq_separation > 0
+        # restores the long-range-coupling signal the strategy was originally
+        # meant to capture. Setting to 0 (default) preserves legacy behavior.
+        self.min_seq_separation = min_seq_separation
         self._fallback_count = 0
         self._total_count = 0
 
@@ -200,7 +208,7 @@ class StructureMasking(BaseMaskingStrategy):
         special_tokens_mask: torch.Tensor,
         knn_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Mask using precomputed kNN neighbor lists (from ESM2 contacts)."""
+        """Mask using precomputed kNN neighbor lists (from ESM2 contacts or IgFold)."""
         seq_len = input_ids.size(0)
         is_special = special_tokens_mask.bool()
 
@@ -215,6 +223,21 @@ class StructureMasking(BaseMaskingStrategy):
         budget = max(1, round(self.mask_prob * num_maskable))
 
         knn_global = knn_indices[maskable_idx].long().clamp(0, seq_len - 1)
+
+        # Filter out near-sequence neighbors. With real backbone coords the
+        # top-k by Euclidean distance includes mostly i±1, i±2, ..., which is
+        # the wrong inductive bias if we want the strategy to teach
+        # long-range structural coupling. Setting the filtered slot to its
+        # own row index makes the contact-preserving select treat that slot
+        # as a self-protect (no-op) — see _contact_preserving_select.
+        if self.min_seq_separation > 0:
+            row_idx = maskable_idx.unsqueeze(1).expand_as(knn_global)
+            sep = (knn_global - row_idx).abs()
+            too_close = sep <= self.min_seq_separation
+            # Replace too-close neighbors with the row's own index; the
+            # downstream loop already protects the seed itself, so this
+            # entries become harmless self-references.
+            knn_global = torch.where(too_close, row_idx, knn_global)
 
         return self._contact_preserving_select(
             seq_len, maskable_idx, knn_global, budget,
@@ -249,6 +272,18 @@ class StructureMasking(BaseMaskingStrategy):
             maskable_coords.unsqueeze(0),
             maskable_coords.unsqueeze(0),
         ).squeeze(0)
+
+        # Apply long-range filter at distance computation. We add +inf to
+        # near-sequence pairs so they're never selected by topk. This is
+        # equivalent to filtering the kNN result but cleaner.
+        if self.min_seq_separation > 0:
+            local_idx = torch.arange(num_maskable, device=dists.device)
+            global_idx = maskable_idx
+            ii = global_idx.unsqueeze(1)
+            jj = global_idx.unsqueeze(0)
+            sep = (ii - jj).abs()
+            too_close = sep <= self.min_seq_separation
+            dists = dists.masked_fill(too_close, float("inf"))
 
         k = min(self.k_neighbors, num_maskable - 1)
         _, knn_local = dists.topk(k + 1, dim=1, largest=False)
