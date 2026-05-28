@@ -4,9 +4,10 @@ The default `generate_report.py` puts all experiments on a single bar
 chart, which becomes unreadable past about 8 strategies. This script
 produces three plots per metric, partitioned by family:
 
-  1. individual_<metric>.png — the 8 single-pass masking strategies
-     (uniform, cdr, span, structure_longrange, interface, germline,
-     intersection, plus the legacy structure_medium for ablation).
+  1. individual_<metric>.png — the random-init control plus the 8
+     single-pass masking strategies (untrained, uniform, cdr, span,
+     structure_longrange, interface, germline, intersection, plus the
+     legacy structure_medium for ablation).
   2. hybrid_<metric>.png — the 8 curriculum / continued-pretraining
      hybrid variants.
   3. all_sorted_<metric>.png — every strategy on a single horizontal
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Strategy taxonomy
 INDIVIDUAL = [
+    "untrained_medium",            # random-init control (no MLM pretraining)
     "uniform_medium",
     "cdr_medium",
     "span_medium",
@@ -52,6 +54,7 @@ HYBRID = [
 ALL = INDIVIDUAL + HYBRID
 
 DISPLAY = {
+    "untrained_medium": "untrained",
     "uniform_medium": "uniform",
     "cdr_medium": "cdr",
     "span_medium": "span",
@@ -72,6 +75,7 @@ DISPLAY = {
 
 # Family colors — consistent across all plots
 FAMILY_COLOR = {
+    "untrained_medium": "#CCCCCC", # random-init control, light grey
     "uniform_medium": "#777777",   # baseline grey
     "cdr_medium": "#F58518",
     "span_medium": "#54A24B",

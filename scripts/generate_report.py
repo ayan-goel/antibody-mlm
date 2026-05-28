@@ -3,12 +3,13 @@
 Discovers experiment results and produces terminal tables, CSV, LaTeX
 tables, Markdown summaries, and comparison plots.
 
-By default the report covers only the 7 single-chain masking strategies
-(uniform / cdr / span / structure / interface / germline /
-hybrid_curriculum). The paired-chain experiments (multispecific,
-hybrid_paired) were trained on a different data regime and are not
-directly comparable to single-chain models on the VH-only benchmarks;
-they are excluded unless --include-paired is passed.
+By default the report covers the random-init control plus the 7
+single-chain masking strategies (untrained / uniform / cdr / span /
+structure / interface / germline / hybrid_curriculum). The paired-chain
+experiments (multispecific, hybrid_paired) were trained on a different
+data regime and are not directly comparable to single-chain models on
+the VH-only benchmarks; they are excluded unless --include-paired is
+passed.
 
 Usage:
     python scripts/generate_report.py
@@ -47,10 +48,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Default set of experiments in the report: the 7 single-chain masking
-# strategies that share a training and evaluation regime and are directly
-# comparable on the VH-only benchmark suite.
+# Default set of experiments in the report: the random-init control
+# (untrained_medium) plus the 7 single-chain masking strategies. All share
+# a training/eval regime and are directly comparable on the VH-only
+# benchmark suite.
 DEFAULT_SINGLE_CHAIN_EXPERIMENTS = [
+    "untrained_medium",
     "uniform_medium",
     "cdr_medium",
     "span_medium",
@@ -89,9 +92,10 @@ def main() -> None:
         "--experiments", type=str, nargs="*", default=None,
         help=(
             "Explicit list of experiment names to include. Defaults to the "
-            "7 single-chain models. Paired-chain models are excluded by "
-            "default because they were trained on a different data regime "
-            "and the VH-only benchmarks are not directly comparable."
+            "random-init control plus the 7 single-chain masking strategies. "
+            "Paired-chain models are excluded by default because they were "
+            "trained on a different data regime and the VH-only benchmarks "
+            "are not directly comparable."
         ),
     )
     parser.add_argument(

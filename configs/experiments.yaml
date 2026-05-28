@@ -2,6 +2,9 @@
 # Used by scripts/run_all_evaluations.py and scripts/generate_report.py.
 
 experiments:
+  untrained_medium:
+    config: configs/untrained_medium.yaml
+    checkpoint: models/checkpoints/untrained_medium/final
   uniform_medium:
     config: configs/medium.yaml
     checkpoint: models/checkpoints/uniform_medium/final
