@@ -21,6 +21,7 @@ data/sabdab/
 data/tap.tab
 *.jsonl
 markdown/
+paper/
 
 # =============================================================
 # Model checkpoints & weights
