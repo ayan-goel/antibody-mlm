@@ -14,9 +14,13 @@ import logging
 import re
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
+from torch.utils.data import Dataset
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 logger = logging.getLogger(__name__)
 
@@ -234,3 +238,141 @@ def load_ab_bind(
         skipped,
     )
     return records
+
+
+# ---------------------------------------------------------------------------
+# Supervised probe splits (ddG regression on frozen embeddings)
+# ---------------------------------------------------------------------------
+
+class ABBindDataset(Dataset):
+    """ddG regression dataset over AB-Bind mutants.
+
+    Encodes the **mutant** sequence only. The wildtype is constant within a
+    complex, so it contributes a constant offset that cannot affect the
+    within-complex ranking that per-complex Spearman measures — which keeps
+    this inside the standard single-sequence probe pipeline.
+
+    ``labels`` is a 2-vector ``[ddg_z, group_index]``. The group index rides
+    along in the label tensor because the base task's ``compute_metrics``
+    receives only (predictions, labels), and per-complex metrics need to know
+    which complex each row came from. The loss reads column 0 only.
+    """
+
+    def __init__(
+        self,
+        records: list[dict[str, Any]],
+        tokenizer: "PreTrainedTokenizerBase",
+        group_to_index: dict[str, int],
+        mean: float = 0.0,
+        std: float = 1.0,
+        max_length: int = 160,
+    ) -> None:
+        from utils.tokenizer import tokenize_single_chain
+
+        self._tokenize = tokenize_single_chain
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.records = records
+        self.group_to_index = group_to_index
+        self.mean = mean
+        self.std = std if std > 0 else 1.0
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        rec = self.records[idx]
+        encoding = self._tokenize(
+            self.tokenizer, rec["mutant_seq"], self.max_length,
+        )
+        ddg_z = (float(rec["ddg"]) - self.mean) / self.std
+        encoding["labels"] = [ddg_z, float(self.group_to_index[rec["pdb_id"]])]
+        return encoding
+
+    @property
+    def groups(self) -> list[str]:
+        """PDB id per record, in dataset order."""
+        return [r["pdb_id"] for r in self.records]
+
+
+def _assign_complexes_to_splits(
+    sizes: dict[str, int], fracs: tuple[float, float, float], seed: int,
+) -> dict[str, str]:
+    """Greedily bin-pack complexes into train/val/test by record count.
+
+    AB-Bind is severely skewed — one complex holds ~35% of all mutants — so a
+    naive split *by complex count* produces wildly unbalanced *record* counts.
+    Complexes are shuffled, then assigned largest-first to whichever split is
+    furthest below its target share. Complexes never straddle splits, so the
+    model cannot memorise a per-complex ddG offset and reuse it at test time.
+    """
+    import random
+
+    total = sum(sizes.values())
+    targets = {
+        "train": fracs[0] * total, "val": fracs[1] * total, "test": fracs[2] * total,
+    }
+    current = {"train": 0, "val": 0, "test": 0}
+    assignment: dict[str, str] = {}
+
+    order = sorted(sizes)
+    random.Random(seed).shuffle(order)
+    for pdb in sorted(order, key=lambda p: -sizes[p]):
+        split = max(targets, key=lambda s: targets[s] - current[s])
+        assignment[pdb] = split
+        current[split] += sizes[pdb]
+    return assignment
+
+
+def load_ab_bind_splits(
+    tokenizer: "PreTrainedTokenizerBase",
+    data_dir: str | Path = "data/ab_bind",
+    max_length: int = 160,
+    fracs: tuple[float, float, float] = (0.6, 0.2, 0.2),
+    seed: int = 42,
+    min_mutants_per_complex: int = 3,
+) -> tuple[ABBindDataset, ABBindDataset, ABBindDataset]:
+    """Return (train, val, test) ddG datasets split by complex.
+
+    Complexes with fewer than ``min_mutants_per_complex`` records are dropped:
+    per-complex Spearman is undefined for them, matching the zero-shot
+    benchmark in ``scripts/benchmark_mutations.py``.
+
+    Labels are z-scored using **training-split** statistics only.
+    """
+    from collections import Counter
+
+    records = load_ab_bind(data_dir)
+
+    counts = Counter(r["pdb_id"] for r in records)
+    keep = {p for p, n in counts.items() if n >= min_mutants_per_complex}
+    records = [r for r in records if r["pdb_id"] in keep]
+
+    sizes = {p: counts[p] for p in keep}
+    assignment = _assign_complexes_to_splits(sizes, fracs, seed)
+    group_to_index = {p: i for i, p in enumerate(sorted(keep))}
+
+    by_split: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
+    for rec in records:
+        by_split[assignment[rec["pdb_id"]]].append(rec)
+
+    train_ddg = [float(r["ddg"]) for r in by_split["train"]]
+    mean = sum(train_ddg) / len(train_ddg)
+    var = sum((d - mean) ** 2 for d in train_ddg) / max(len(train_ddg) - 1, 1)
+    std = var ** 0.5
+
+    logger.info(
+        "AB-Bind ddG splits (by complex): train=%d/%dc val=%d/%dc test=%d/%dc "
+        "| train ddG mean=%.2f sd=%.2f",
+        len(by_split["train"]), sum(1 for v in assignment.values() if v == "train"),
+        len(by_split["val"]), sum(1 for v in assignment.values() if v == "val"),
+        len(by_split["test"]), sum(1 for v in assignment.values() if v == "test"),
+        mean, std,
+    )
+
+    return tuple(  # type: ignore[return-value]
+        ABBindDataset(
+            by_split[s], tokenizer, group_to_index, mean, std, max_length,
+        )
+        for s in ("train", "val", "test")
+    )

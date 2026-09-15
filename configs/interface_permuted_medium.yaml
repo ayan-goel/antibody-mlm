@@ -1,0 +1,62 @@
+# LABEL-PERMUTATION CONTROL for the `interface` masking strategy.
+#
+# Answers reviewers #2.3 ("the new masks may simply make training harder or
+# focus on different sequence positions, even without useful biological
+# knowledge") and #5.2 ("the experiments do not isolate which components
+# matter") for the *specialist* arms. The hybrid arms already have their
+# equivalent control in configs/hybrid_random_medium.yaml.
+#
+# Identical to configs/interface_medium.yaml in EVERY field except
+# data.paratope_path and training.output_dir. The permuted sidecar is built by
+# scripts/permute_paratope_labels.py, which shuffles each sequence's per-residue
+# paratope probabilities within that sequence — preserving the marginal mask
+# rate and the entire weight distribution, destroying only WHICH residues are
+# paratopes.
+#
+# Read the result as:
+#   interface >  interface-permuted  ->  the gain comes from paratope identity;
+#                                        the biological prior does real work.
+#   interface ~= interface-permuted  ->  the gain was mask statistics, and we
+#                                        learn it before a reviewer does.
+#
+# See wiki/rebuttal.md §11 "The permutation control is the best remaining buy".
+
+seed: 42
+
+data:
+  processed_path: "data/processed/oas_vh_500k.jsonl"
+  max_length: 160
+  min_length: 80
+  train_split: 0.9
+  valid_amino_acids: "ACDEFGHIKLMNPQRSTVWY"
+  paratope_path: "data/structures/oas_vh_500k_paratope_permuted.pt"
+
+masking:
+  strategy: "interface"
+  mask_prob: 0.15
+  mask_token_ratio: 0.8
+  random_token_ratio: 0.1
+  params:
+    paratope_weight: 6.0
+    non_paratope_weight: 1.0
+
+model:
+  model_name: "alchemab/antiberta2"
+  from_pretrained: false
+  model_size: "medium"
+
+training:
+  output_dir: "models/checkpoints/interface_permuted_medium"
+  batch_size: 32
+  learning_rate: 5.0e-5
+  num_epochs: 20
+  max_steps: 125000  # equal-step comparison across strategies
+  warmup_steps: 6250  # 5% of 125k max_steps
+  weight_decay: 0.01
+  logging_steps: 100
+  save_steps: 2000
+  eval_steps: 5000
+  fp16: true
+  dataloader_num_workers: 4
+  gradient_accumulation_steps: 2
+  early_stopping_patience: 0  # disabled for fair equal-step comparison

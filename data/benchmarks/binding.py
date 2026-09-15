@@ -9,12 +9,12 @@ Source: https://opig.stats.ox.ac.uk/webapps/covabdab/
 from __future__ import annotations
 
 import logging
+import random
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizerBase
 
@@ -67,13 +67,25 @@ def _load_and_filter(csv_path: Path) -> pd.DataFrame:
     )
     df["vh_sequence"] = df[vh_col].str.strip()
 
+    # Clonotype key for grouped splitting. SARS-CoV-2 responses are dominated
+    # by public clonotypes (IGHV3-53/3-66 and friends), so clonal relatives are
+    # near-duplicates: a random split scatters them across train and test and
+    # inflates every metric. Standard approximate clonotype = same V gene,
+    # same CDRH3 length, same CDRH3 prefix.
+    v_gene = df["Heavy V Gene"].fillna("NA").str.split("*").str[0].str.strip()
+    cdrh3 = df["CDRH3"].fillna("NA").astype(str)
+    df["clonotype"] = (
+        v_gene + "|" + cdrh3.str.len().astype(str) + "|" + cdrh3.str[:4]
+    )
+
     logger.info(
-        "CoV-AbDab filtered: %d samples (pos=%d, neg=%d)",
+        "CoV-AbDab filtered: %d samples (pos=%d, neg=%d, clonotypes=%d)",
         len(df),
         (df["label"] == 1).sum(),
         (df["label"] == 0).sum(),
+        df["clonotype"].nunique(),
     )
-    return df[["vh_sequence", "label"]].reset_index(drop=True)
+    return df[["vh_sequence", "label", "clonotype"]].reset_index(drop=True)
 
 
 class BindingDataset(Dataset):
@@ -114,21 +126,43 @@ def load_binding_splits(
     data_dir: str | Path = "data/covabdab",
     seed: int = 42,
 ) -> tuple[BindingDataset, BindingDataset, BindingDataset]:
-    """Download CoV-AbDab and return stratified (train, val, test) datasets."""
+    """Download CoV-AbDab and return clonotype-grouped (train, val, test) datasets.
+
+    Splits are grouped by approximate clonotype so no clonal family straddles
+    train and test. A label-stratified *random* split would place near-identical
+    public-clonotype relatives on both sides and overstate performance; the
+    grouping trades a little label balance for a split that measures
+    generalisation to unseen lineages.
+    """
     csv_path = download_covabdab(data_dir)
     df = _load_and_filter(csv_path)
 
-    train_df, temp_df = train_test_split(
-        df, test_size=0.30, random_state=seed, stratify=df["label"],
-    )
-    val_df, test_df = train_test_split(
-        temp_df, test_size=0.50, random_state=seed, stratify=temp_df["label"],
-    )
+    # Assign whole clonotypes to splits, largest first, to whichever split is
+    # furthest below its target share (same bin-packing idea as AB-Bind).
+    sizes = df.groupby("clonotype").size().to_dict()
+    targets = {"train": 0.70 * len(df), "val": 0.15 * len(df), "test": 0.15 * len(df)}
+    current = {"train": 0, "val": 0, "test": 0}
+    assignment: dict[str, str] = {}
+
+    order = sorted(sizes)
+    random.Random(seed).shuffle(order)
+    for clono in sorted(order, key=lambda c: -sizes[c]):
+        split = max(targets, key=lambda s: targets[s] - current[s])
+        assignment[clono] = split
+        current[split] += sizes[clono]
+
+    split_col = df["clonotype"].map(assignment)
+    train_df = df[split_col == "train"]
+    val_df = df[split_col == "val"]
+    test_df = df[split_col == "test"]
 
     for name, split_df in [("train", train_df), ("val", val_df), ("test", test_df)]:
         n_pos = (split_df["label"] == 1).sum()
         n_neg = (split_df["label"] == 0).sum()
-        logger.info("  %s: %d samples (pos=%d, neg=%d)", name, len(split_df), n_pos, n_neg)
+        logger.info(
+            "  %s: %d samples (pos=%d, neg=%d, clonotypes=%d)",
+            name, len(split_df), n_pos, n_neg, split_df["clonotype"].nunique(),
+        )
 
     return (
         BindingDataset(train_df.reset_index(drop=True), tokenizer, max_length),

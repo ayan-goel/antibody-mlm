@@ -1,0 +1,9 @@
+configs/seeds/hybrid_random_medium_s42.yaml	hybrid_random_medium	train
+configs/seeds/hybrid_random_medium_s1.yaml	hybrid_random_medium_s1	train
+configs/seeds/hybrid_random_medium_s2.yaml	hybrid_random_medium_s2	train
+configs/seeds/hybrid_curriculum_medium_s1.yaml	hybrid_curriculum_medium_s1	train
+configs/seeds/hybrid_curriculum_medium_s2.yaml	hybrid_curriculum_medium_s2	train
+configs/seeds/hybrid_stretched_medium_s1.yaml	hybrid_stretched_medium_s1	train
+configs/seeds/hybrid_stretched_medium_s2.yaml	hybrid_stretched_medium_s2	train
+configs/seeds/hybrid_warmstart_medium_s1.yaml	hybrid_warmstart_medium_s1	train
+configs/seeds/hybrid_warmstart_medium_s2.yaml	hybrid_warmstart_medium_s2	train

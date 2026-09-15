@@ -60,10 +60,118 @@ experiments:
   hybrid_adaptive_medium:
     config: configs/hybrid_adaptive_medium.yaml
     checkpoint: models/checkpoints/hybrid_adaptive_medium/final
+  uniform_medium_s1:
+    config: configs/seeds/uniform_medium_s1.yaml
+    checkpoint: models/checkpoints/uniform_medium_s1/final
+  uniform_medium_s2:
+    config: configs/seeds/uniform_medium_s2.yaml
+    checkpoint: models/checkpoints/uniform_medium_s2/final
+  cdr_medium_s1:
+    config: configs/seeds/cdr_medium_s1.yaml
+    checkpoint: models/checkpoints/cdr_medium_s1/final
+  cdr_medium_s2:
+    config: configs/seeds/cdr_medium_s2.yaml
+    checkpoint: models/checkpoints/cdr_medium_s2/final
+  span_medium_s1:
+    config: configs/seeds/span_medium_s1.yaml
+    checkpoint: models/checkpoints/span_medium_s1/final
+  span_medium_s2:
+    config: configs/seeds/span_medium_s2.yaml
+    checkpoint: models/checkpoints/span_medium_s2/final
+  structure_medium_s1:
+    config: configs/seeds/structure_medium_s1.yaml
+    checkpoint: models/checkpoints/structure_medium_s1/final
+  structure_medium_s2:
+    config: configs/seeds/structure_medium_s2.yaml
+    checkpoint: models/checkpoints/structure_medium_s2/final
+  structure_longrange_medium_s1:
+    config: configs/seeds/structure_longrange_medium_s1.yaml
+    checkpoint: models/checkpoints/structure_longrange_medium_s1/final
+  structure_longrange_medium_s2:
+    config: configs/seeds/structure_longrange_medium_s2.yaml
+    checkpoint: models/checkpoints/structure_longrange_medium_s2/final
+  interface_medium_s1:
+    config: configs/seeds/interface_medium_s1.yaml
+    checkpoint: models/checkpoints/interface_medium_s1/final
+  interface_medium_s2:
+    config: configs/seeds/interface_medium_s2.yaml
+    checkpoint: models/checkpoints/interface_medium_s2/final
+  germline_medium_s1:
+    config: configs/seeds/germline_medium_s1.yaml
+    checkpoint: models/checkpoints/germline_medium_s1/final
+  germline_medium_s2:
+    config: configs/seeds/germline_medium_s2.yaml
+    checkpoint: models/checkpoints/germline_medium_s2/final
+  intersection_medium_s1:
+    config: configs/seeds/intersection_medium_s1.yaml
+    checkpoint: models/checkpoints/intersection_medium_s1/final
+  intersection_medium_s2:
+    config: configs/seeds/intersection_medium_s2.yaml
+    checkpoint: models/checkpoints/intersection_medium_s2/final
+  untrained_medium_s1:
+    config: configs/seeds/untrained_medium_s1.yaml
+    checkpoint: models/checkpoints/untrained_medium_s1/final
+  untrained_medium_s2:
+    config: configs/seeds/untrained_medium_s2.yaml
+    checkpoint: models/checkpoints/untrained_medium_s2/final
+  hybrid_random_medium:
+    config: configs/seeds/hybrid_random_medium_s42.yaml
+    checkpoint: models/checkpoints/hybrid_random_medium/final
+  hybrid_random_medium_s1:
+    config: configs/seeds/hybrid_random_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_random_medium_s1/final
+  hybrid_random_medium_s2:
+    config: configs/seeds/hybrid_random_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_random_medium_s2/final
+  hybrid_curriculum_medium_s1:
+    config: configs/seeds/hybrid_curriculum_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_curriculum_medium_s1/final
+  hybrid_curriculum_medium_s2:
+    config: configs/seeds/hybrid_curriculum_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_curriculum_medium_s2/final
+  hybrid_stretched_medium_s1:
+    config: configs/seeds/hybrid_stretched_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_stretched_medium_s1/final
+  hybrid_stretched_medium_s2:
+    config: configs/seeds/hybrid_stretched_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_stretched_medium_s2/final
+  hybrid_warmstart_medium_s1:
+    config: configs/seeds/hybrid_warmstart_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_warmstart_medium_s1/final
+  hybrid_warmstart_medium_s2:
+    config: configs/seeds/hybrid_warmstart_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_warmstart_medium_s2/final
+  hybrid_reverse_medium_s1:
+    config: configs/seeds/hybrid_reverse_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_reverse_medium_s1/final
+  hybrid_reverse_medium_s2:
+    config: configs/seeds/hybrid_reverse_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_reverse_medium_s2/final
+  hybrid_perbatch_medium_s1:
+    config: configs/seeds/hybrid_perbatch_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_perbatch_medium_s1/final
+  hybrid_perbatch_medium_s2:
+    config: configs/seeds/hybrid_perbatch_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_perbatch_medium_s2/final
+  hybrid_weighted_medium_s1:
+    config: configs/seeds/hybrid_weighted_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_weighted_medium_s1/final
+  hybrid_weighted_medium_s2:
+    config: configs/seeds/hybrid_weighted_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_weighted_medium_s2/final
+  hybrid_adaptive_medium_s1:
+    config: configs/seeds/hybrid_adaptive_medium_s1.yaml
+    checkpoint: models/checkpoints/hybrid_adaptive_medium_s1/final
+  hybrid_adaptive_medium_s2:
+    config: configs/seeds/hybrid_adaptive_medium_s2.yaml
+    checkpoint: models/checkpoints/hybrid_adaptive_medium_s2/final
+  interface_permuted_medium:
+    config: configs/interface_permuted_medium.yaml
+    checkpoint: models/checkpoints/interface_permuted_medium/final
 
 # Downstream task configs applied to every experiment checkpoint.
 downstream_tasks:
-  - configs/downstream/paratope_probe.yaml
-  - configs/downstream/developability_probe.yaml
-  - configs/downstream/contact_map_probe.yaml
-  - configs/downstream/structure_probe_probe.yaml
+- configs/downstream/paratope_probe.yaml
+- configs/downstream/developability_probe.yaml
+- configs/downstream/contact_map_probe.yaml
+- configs/downstream/structure_probe_probe.yaml

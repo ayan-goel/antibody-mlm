@@ -27,6 +27,7 @@ import yaml
 from transformers import RoFormerForMaskedLM
 
 from data.dataset import AntibodyDataset
+from data.splits import make_train_eval_split
 from data.dataset_paired import PairedAntibodyDataset
 from evaluation.downstream import DownstreamConfig, get_task, load_downstream_config
 from evaluation.infilling import InfillingEvaluator
@@ -44,12 +45,11 @@ from utils.tokenizer import (
     tokenize_single_chain,
 )
 
-# Held-out split seed: every model uses the SAME generator seed for the
-# train/eval random_split, regardless of its training-time `config.seed`.
-# This guarantees the eval set is identical across models so cross-model
-# metric comparisons are well-defined. Don't change without re-running
-# every experiment.
-EVAL_SPLIT_SEED = 42
+# The held-out split is defined once in data/splits.py and keyed on
+# `config.data.data_split_seed` (default 42), independent of the training-time
+# `config.seed`. This guarantees the eval set is identical across models — and
+# across seed replicates of the same model — so cross-model metric comparisons
+# are well-defined. Don't change it without re-running every experiment.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -575,11 +575,10 @@ def run_experiment(
             paratope_path=config.data.paratope_path or None,
             germline_path=config.data.germline_path or None,
         )
-    eval_size = int(len(full_dataset) * (1 - config.data.train_split))
-    _, eval_dataset = torch.utils.data.random_split(
+    _, eval_dataset = make_train_eval_split(
         full_dataset,
-        [len(full_dataset) - eval_size, eval_size],
-        generator=torch.Generator().manual_seed(EVAL_SPLIT_SEED),
+        config.data.train_split,
+        config.data.data_split_seed,
     )
 
     # Set up the output path and load any existing results so crashed/killed

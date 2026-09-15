@@ -1,0 +1,6 @@
+configs/seeds/hybrid_reverse_medium_s1.yaml	hybrid_reverse_medium_s1	train
+configs/seeds/hybrid_reverse_medium_s2.yaml	hybrid_reverse_medium_s2	train
+configs/seeds/hybrid_perbatch_medium_s1.yaml	hybrid_perbatch_medium_s1	train
+configs/seeds/hybrid_perbatch_medium_s2.yaml	hybrid_perbatch_medium_s2	train
+configs/seeds/hybrid_weighted_medium_s1.yaml	hybrid_weighted_medium_s1	train
+configs/seeds/hybrid_weighted_medium_s2.yaml	hybrid_weighted_medium_s2	train

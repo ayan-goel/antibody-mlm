@@ -60,6 +60,7 @@ import yaml
 from transformers import RoFormerForMaskedLM
 
 from data.dataset import AntibodyDataset
+from data.splits import make_train_eval_split
 from data.dataset_paired import PairedAntibodyDataset
 from evaluation.attention_analysis import AttentionAnalyzer
 from evaluation.downstream import DownstreamConfig, get_task
@@ -67,10 +68,9 @@ from training.config import load_config
 from utils.seed import set_seed
 from utils.tokenizer import load_tokenizer, load_tokenizer_multispecific
 
-# Keep this in sync with EVAL_SPLIT_SEED in scripts/run_all_evaluations.py so
-# the attention_analysis eval_dataset here uses the same held-out split the
-# rest of the evaluation pipeline does.
-EVAL_SPLIT_SEED = 42
+# The held-out split comes from data/splits.py, so the attention_analysis
+# eval_dataset here is by construction the same one the rest of the evaluation
+# pipeline uses — no constant to keep in sync.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -244,11 +244,10 @@ def _run_attention_analysis(
             paratope_path=config.data.paratope_path or None,
             germline_path=config.data.germline_path or None,
         )
-    eval_size = int(len(full_dataset) * (1 - config.data.train_split))
-    _, eval_dataset = torch.utils.data.random_split(
+    _, eval_dataset = make_train_eval_split(
         full_dataset,
-        [len(full_dataset) - eval_size, eval_size],
-        generator=torch.Generator().manual_seed(EVAL_SPLIT_SEED),
+        config.data.train_split,
+        config.data.data_split_seed,
     )
 
     # Prefer SAbDab real crystal coords for the attention-contact
